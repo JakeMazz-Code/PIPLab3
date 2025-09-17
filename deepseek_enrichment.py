@@ -135,6 +135,14 @@ def _fallback_payload(text: str) -> dict[str, Any]:
         if keyword in lowered:
             severity = max(severity, value)
     risk = min(1.0, max(0.05, severity / 5.0))
+    if severity >= 4:
+        guess = "north median line"
+    elif severity >= 3:
+        guess = "east median line"
+    elif severity >= 2:
+        guess = "south median line"
+    else:
+        guess = "median line"
     return {
         "category": None,
         "actors": [],
@@ -142,7 +150,7 @@ def _fallback_payload(text: str) -> dict[str, Any]:
         "severity_0_5": severity,
         "risk_score": risk,
         "summary_one_line": "Review required: JSON parse failure.",
-        "where_guess": None,
+        "where_guess": guess,
         "geo_quality": None,
         "needs_review": True,
     }
@@ -250,8 +258,12 @@ def enrich_incidents(df: pd.DataFrame) -> pd.DataFrame:
             response = _fallback_payload("Missing response")
             response["_raw_response"] = ""
         for key in new_columns:
-            if key in response:
-                enriched.at[row_index, key] = response[key]
+            if key not in response:
+                continue
+            value = response[key]
+            if key == "where_guess" and value in (None, "", "median line"):
+                continue
+            enriched.at[row_index, key] = value
     return enriched
 
 

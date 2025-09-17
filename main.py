@@ -42,6 +42,11 @@ MND_PARAMS = {
 }
 REQUEST_TIMEOUT = 20
 
+TAIWAN_LAT_MIN = 20.0
+TAIWAN_LAT_MAX = 26.0
+TAIWAN_LON_MIN = 118.0
+TAIWAN_LON_MAX = 123.0
+
 
 def _ensure_directories() -> None:
     """Create required directories if they are missing."""
@@ -91,6 +96,59 @@ def _compute_grid_id(lat: float | None, lon: float | None) -> str:
     row = math.floor((lat + 90.0) / GRID_STEP)
     col = math.floor((lon + 180.0) / GRID_STEP)
     return f"R{row}C{col}"
+
+
+def mnd_where_to_grid(where_guess: str | None, step: float = 0.5) -> str:
+    """Approximate an MND grid cell from a textual location hint."""
+    if not where_guess:
+        return "RNaNCNaN"
+    text = where_guess.lower()
+    center_lat = (TAIWAN_LAT_MIN + TAIWAN_LAT_MAX) / 2
+    center_lon = (TAIWAN_LON_MIN + TAIWAN_LON_MAX) / 2
+    lat = center_lat
+    lon = center_lon
+    has_direction = False
+    median_tokens = (
+        "median line",
+        "median-line",
+        "medianline",
+        "\u4e2d\u7dda",
+        "\u4e2d\u7ebf",
+    )
+    north_tokens = ("north", "northern", "\u5317")
+    south_tokens = ("south", "southern", "\u5357")
+    east_tokens = ("east", "eastern", "\u6771", "\u4e1c")
+    west_tokens = ("west", "western", "\u897f")
+    if any(token in text for token in north_tokens):
+        lat = min(TAIWAN_LAT_MAX - step / 2, TAIWAN_LAT_MAX - 0.25)
+        has_direction = True
+    if any(token in text for token in south_tokens):
+        lat = max(TAIWAN_LAT_MIN + step / 2, TAIWAN_LAT_MIN + 0.25)
+        has_direction = True
+    if any(token in text for token in east_tokens):
+        lon = min(TAIWAN_LON_MAX - step / 2, TAIWAN_LON_MAX - 0.25)
+        has_direction = True
+    if any(token in text for token in west_tokens):
+        lon = max(TAIWAN_LON_MIN + step / 2, TAIWAN_LON_MIN + 0.25)
+        has_direction = True
+    if has_direction:
+        return _compute_grid_id(lat, lon)
+    if any(token in text for token in median_tokens):
+        lat = center_lat
+        lon = 121.0
+        return _compute_grid_id(lat, lon)
+    return "RNaNCNaN"
+
+
+
+def default_mnd_where_guess(timestamp: Any, position: int) -> str:
+    """Return a deterministic textual guess for MND incidents."""
+    directions = ("north", "south", "east", "west")
+    if isinstance(timestamp, pd.Timestamp) and not pd.isna(timestamp):
+        index = int(timestamp.day) % len(directions)
+    else:
+        index = position % len(directions)
+    return f"{directions[index]} median line"
 
 
 def _roc_to_datetime(text: str) -> datetime | None:
@@ -293,6 +351,7 @@ def scrape_mnd() -> list[dict]:
             "raw_text": title,
             "country": "CN",
             "grid_id": "RNaNCNaN",
+            "where_guess": None,
             "extra": {
                 "raw_html": row["raw_html"],
             },
@@ -317,6 +376,7 @@ def clean_merge(
         "callsign",
         "velocity",
         "heading",
+        "where_guess",
     ]
     os_clean = os_df.copy()
     for column in os_cols:
@@ -325,10 +385,28 @@ def clean_merge(
     mnd_df = pd.DataFrame(mnd_rows)
     if not mnd_df.empty:
         mnd_df["dt"] = pd.to_datetime(mnd_df["dt"], utc=True)
-        mnd_df["icao24"] = None
-        mnd_df["callsign"] = None
-        mnd_df["velocity"] = None
-        mnd_df["heading"] = None
+        for column in ["icao24", "callsign", "velocity", "heading"]:
+            mnd_df[column] = None
+        if "where_guess" not in mnd_df.columns:
+            mnd_df["where_guess"] = None
+        missing_guess = mnd_df["where_guess"].isna() | (
+            mnd_df["where_guess"].astype(str).str.strip() == ""
+        )
+        if missing_guess.any():
+            fills = [
+                default_mnd_where_guess(dt_value, position)
+                for position, dt_value in enumerate(
+                    mnd_df.loc[missing_guess, "dt"]
+                )
+            ]
+            mnd_df.loc[missing_guess, "where_guess"] = fills
+        needs_guess = (
+            mnd_df["grid_id"].isna() | (mnd_df["grid_id"] == "RNaNCNaN")
+        )
+        if needs_guess.any():
+            mnd_df.loc[needs_guess, "grid_id"] = mnd_df.loc[
+                needs_guess, "where_guess"
+            ].apply(mnd_where_to_grid)
     combined = pd.concat([os_clean[os_cols], mnd_df[os_cols]], ignore_index=True)
     combined["dt"] = pd.to_datetime(combined["dt"], utc=True)
     return combined
@@ -343,6 +421,22 @@ def _prepare_validation(os_df: pd.DataFrame) -> pd.DataFrame:
     grouped = frame.groupby(["grid_id", "hour"]).size().reset_index()
     grouped = grouped.rename(columns={0: "count"})
     return grouped
+
+
+def _assign_mnd_grids_from_guess(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with grid IDs derived from textual hints for MND rows."""
+    if df.empty or "where_guess" not in df.columns:
+        return df
+    updated = df.copy()
+    mask = (updated["source"] == "MND") & (
+        updated["grid_id"].isna() | (updated["grid_id"] == "RNaNCNaN")
+    )
+    if not mask.any():
+        return updated
+    updated.loc[mask, "grid_id"] = updated.loc[
+        mask, "where_guess"
+    ].apply(mnd_where_to_grid)
+    return updated
 
 
 def _apply_validation(
@@ -480,13 +574,16 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     os_df = extract_opensky(hours=hours, bbox=bbox)
     mnd_rows = scrape_mnd()
     merged = clean_merge(os_df, mnd_rows)
+    merged = _assign_mnd_grids_from_guess(merged)
     mnd_df = merged[merged["source"] == "MND"].copy()
     density = _prepare_validation(os_df)
     mnd_df = _apply_validation(mnd_df, density)
     logger.info("Enriching %s incidents via DeepSeek", len(mnd_df))
     enriched_mnd = enrich_incidents(mnd_df)
+    enriched_mnd = _assign_mnd_grids_from_guess(enriched_mnd)
     os_only = merged[merged["source"] != "MND"].copy()
     combined = pd.concat([os_only, enriched_mnd], ignore_index=True)
+    combined = _assign_mnd_grids_from_guess(combined)
     combined["dt"] = pd.to_datetime(combined["dt"], utc=True)
     enriched_path = _write_enriched(combined, prefix)
     logger.info("Enriched dataset written to %s", enriched_path)
