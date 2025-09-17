@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+import copy
 import pandas as pd
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -31,6 +33,40 @@ SYSTEM_PROMPT = (
     "summary_one_line is short string. where_guess is str or null. "
     "geo_quality is high, medium, low, or null. No commentary."
 )
+
+
+@dataclass
+class LLMRunMetrics:
+    total_calls: int = 0
+    success: int = 0
+    invalid_json: int = 0
+    retries: int = 0
+    fallbacks: int = 0
+
+
+_LLM_METRICS = LLMRunMetrics()
+
+
+def reset_llm_metrics() -> None:
+    """Reset LLM metrics counters."""
+    global _LLM_METRICS
+    _LLM_METRICS = LLMRunMetrics()
+
+
+
+def get_llm_metrics(reset: bool = True) -> LLMRunMetrics:
+    """Return a snapshot of the current LLM metrics."""
+    global _LLM_METRICS
+    snapshot = copy.deepcopy(_LLM_METRICS)
+    if reset:
+        reset_llm_metrics()
+    return snapshot
+
+
+
+def _record_retry(_retry_state: Any) -> None:
+    """Increment retry counter for DeepSeek calls."""
+    _LLM_METRICS.retries += 1
 
 
 class DeepSeekError(Exception):
@@ -88,6 +124,7 @@ def _safe_parse_json(text: str) -> dict[str, Any]:
 @retry(
     wait=wait_exponential(multiplier=1, min=1, max=8),
     stop=stop_after_attempt(2),
+    before_sleep=_record_retry,
     reraise=True,
 )
 def _call_deepseek_once(text: str) -> tuple[dict[str, Any], str]:
@@ -195,22 +232,32 @@ def _call_deepseek_batch(texts: list[str]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for chunk in _chunked(texts, MAX_BATCH_SIZE):
         for text in chunk:
+            _LLM_METRICS.total_calls += 1
             try:
                 parsed, raw = _call_deepseek_once(text)
-            except (
-                DeepSeekError,
-                requests.RequestException,
-                ValueError,
-            ) as exc:
+            except ValueError as exc:
+                logger.warning(
+                    "DeepSeek parse error, using fallback: %s",
+                    exc,
+                )
+                _LLM_METRICS.invalid_json += 1
+                _LLM_METRICS.fallbacks += 1
+                fallback = _fallback_payload(text)
+                fallback["_raw_response"] = ""
+                results.append(fallback)
+                continue
+            except (DeepSeekError, requests.RequestException) as exc:
                 logger.warning(
                     "DeepSeek call failed, using fallback: %s",
                     exc,
                 )
+                _LLM_METRICS.fallbacks += 1
                 fallback = _fallback_payload(text)
                 fallback["_raw_response"] = ""
                 results.append(fallback)
                 continue
             payload = _ensure_types(parsed)
+            _LLM_METRICS.success += 1
             payload["_raw_response"] = raw
             results.append(payload)
     return results
@@ -256,6 +303,7 @@ def enrich_incidents(df: pd.DataFrame) -> pd.DataFrame:
             response = responses[idx]
         else:
             response = _fallback_payload("Missing response")
+            _LLM_METRICS.fallbacks += 1
             response["_raw_response"] = ""
         for key in new_columns:
             if key not in response:

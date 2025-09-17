@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,7 +18,12 @@ import requests
 from bs4 import BeautifulSoup
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from deepseek_enrichment import enrich_incidents, summarize_theater
+from deepseek_enrichment import (
+    enrich_incidents,
+    get_llm_metrics,
+    reset_llm_metrics,
+    summarize_theater,
+)
 
 
 logging.basicConfig(
@@ -46,6 +52,39 @@ TAIWAN_LAT_MIN = 20.0
 TAIWAN_LAT_MAX = 26.0
 TAIWAN_LON_MIN = 118.0
 TAIWAN_LON_MAX = 123.0
+
+
+def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
+    """Write a parquet file atomically."""
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(
+        delete=False, dir=path.parent, suffix='.tmp'
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        df.to_parquet(tmp_path, index=False)
+        tmp_path.replace(path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+
+def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
+    """Write a CSV file atomically."""
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(
+        delete=False, dir=path.parent, suffix='.tmp'
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        df.to_csv(tmp_path, index=False)
+        tmp_path.replace(path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _ensure_directories() -> None:
@@ -98,48 +137,90 @@ def _compute_grid_id(lat: float | None, lon: float | None) -> str:
     return f"R{row}C{col}"
 
 
-def mnd_where_to_grid(where_guess: str | None, step: float = 0.5) -> str:
-    """Approximate an MND grid cell from a textual location hint."""
-    if not where_guess:
-        return "RNaNCNaN"
-    text = where_guess.lower()
-    center_lat = (TAIWAN_LAT_MIN + TAIWAN_LAT_MAX) / 2
-    center_lon = (TAIWAN_LON_MIN + TAIWAN_LON_MAX) / 2
-    lat = center_lat
-    lon = center_lon
-    has_direction = False
-    median_tokens = (
-        "median line",
-        "median-line",
-        "medianline",
-        "\u4e2d\u7dda",
-        "\u4e2d\u7ebf",
-    )
-    north_tokens = ("north", "northern", "\u5317")
-    south_tokens = ("south", "southern", "\u5357")
-    east_tokens = ("east", "eastern", "\u6771", "\u4e1c")
-    west_tokens = ("west", "western", "\u897f")
-    if any(token in text for token in north_tokens):
-        lat = min(TAIWAN_LAT_MAX - step / 2, TAIWAN_LAT_MAX - 0.25)
-        has_direction = True
-    if any(token in text for token in south_tokens):
-        lat = max(TAIWAN_LAT_MIN + step / 2, TAIWAN_LAT_MIN + 0.25)
-        has_direction = True
-    if any(token in text for token in east_tokens):
-        lon = min(TAIWAN_LON_MAX - step / 2, TAIWAN_LON_MAX - 0.25)
-        has_direction = True
-    if any(token in text for token in west_tokens):
-        lon = max(TAIWAN_LON_MIN + step / 2, TAIWAN_LON_MIN + 0.25)
-        has_direction = True
-    if has_direction:
-        return _compute_grid_id(lat, lon)
-    if any(token in text for token in median_tokens):
-        lat = center_lat
-        lon = 121.0
-        return _compute_grid_id(lat, lon)
-    return "RNaNCNaN"
-
-
+def mnd_where_to_grid(where_guess: str | None, step: float = 0.5) -> str:
+
+    """Approximate an MND grid cell from a textual location hint."""
+
+    if not where_guess:
+
+        return "RNaNCNaN"
+
+    text = where_guess.lower()
+
+    center_lat = (TAIWAN_LAT_MIN + TAIWAN_LAT_MAX) / 2
+
+    center_lon = (TAIWAN_LON_MIN + TAIWAN_LON_MAX) / 2
+
+    lat = center_lat
+
+    lon = center_lon
+
+    has_direction = False
+
+    median_tokens = (
+
+        "median line",
+
+        "median-line",
+
+        "medianline",
+
+        "\u4e2d\u7dda",
+
+        "\u4e2d\u7ebf",
+
+    )
+
+    north_tokens = ("north", "northern", "\u5317")
+
+    south_tokens = ("south", "southern", "\u5357")
+
+    east_tokens = ("east", "eastern", "\u6771", "\u4e1c")
+
+    west_tokens = ("west", "western", "\u897f")
+
+    if any(token in text for token in north_tokens):
+
+        lat = min(TAIWAN_LAT_MAX - step / 2, TAIWAN_LAT_MAX - 0.25)
+
+        has_direction = True
+
+    if any(token in text for token in south_tokens):
+
+        lat = max(TAIWAN_LAT_MIN + step / 2, TAIWAN_LAT_MIN + 0.25)
+
+        has_direction = True
+
+    if any(token in text for token in east_tokens):
+
+        lon = min(TAIWAN_LON_MAX - step / 2, TAIWAN_LON_MAX - 0.25)
+
+        has_direction = True
+
+    if any(token in text for token in west_tokens):
+
+        lon = max(TAIWAN_LON_MIN + step / 2, TAIWAN_LON_MIN + 0.25)
+
+        has_direction = True
+
+    if has_direction:
+
+        return _compute_grid_id(lat, lon)
+
+    if any(token in text for token in median_tokens):
+
+        lat = center_lat
+
+        lon = 121.0
+
+        return _compute_grid_id(lat, lon)
+
+    return "RNaNCNaN"
+
+
+
+
+
 
 def default_mnd_where_guess(timestamp: Any, position: int) -> str:
     """Return a deterministic textual guess for MND incidents."""
@@ -407,77 +488,149 @@ def clean_merge(
             mnd_df.loc[needs_guess, "grid_id"] = mnd_df.loc[
                 needs_guess, "where_guess"
             ].apply(mnd_where_to_grid)
-    combined = pd.concat([os_clean[os_cols], mnd_df[os_cols]], ignore_index=True)
+    combined = pd.concat(
+        [os_clean[os_cols], mnd_df[os_cols]],
+        ignore_index=True,
+    )
     combined["dt"] = pd.to_datetime(combined["dt"], utc=True)
     return combined
 
 
-def _prepare_validation(os_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-grid hourly density for validation."""
+def _prepare_validation(
+    os_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return per-grid and per-hour OpenSky densities."""
     if os_df.empty:
-        return pd.DataFrame(columns=["grid_id", "hour", "count"])
+        empty_grid = pd.DataFrame(columns=["grid_id", "hour", "count"])
+        empty_hour = pd.DataFrame(columns=["hour", "count"])
+        return empty_grid, empty_hour
     frame = os_df.copy()
-    frame["hour"] = frame["dt"].dt.floor("H")
-    grouped = frame.groupby(["grid_id", "hour"]).size().reset_index()
-    grouped = grouped.rename(columns={0: "count"})
-    return grouped
+    frame["hour"] = frame["dt"].dt.floor("h")
+    grid_density = (
+        frame.groupby(["grid_id", "hour"])
+        .size()
+        .reset_index(name="count")
+    )
+    hour_density = (
+        frame.groupby("hour")
+        .size()
+        .reset_index(name="count")
+    )
+    return grid_density, hour_density
 
 
 def _assign_mnd_grids_from_guess(df: pd.DataFrame) -> pd.DataFrame:
     """Return a copy with grid IDs derived from textual hints for MND rows."""
-    if df.empty or "where_guess" not in df.columns:
+    if df.empty:
         return df
     updated = df.copy()
-    mask = (updated["source"] == "MND") & (
+    if "where_guess" not in updated.columns:
+        updated["where_guess"] = None
+    mnd_mask = updated["source"] == "MND"
+    if not mnd_mask.any():
+        return updated
+    missing_guess = mnd_mask & (
+        updated["where_guess"].isna()
+        | (updated["where_guess"].astype(str).str.strip() == "")
+    )
+    if missing_guess.any():
+        dt_series = updated.loc[missing_guess, "dt"]
+        fills = [
+            default_mnd_where_guess(dt_value, position)
+            for position, dt_value in enumerate(dt_series)
+        ]
+        updated.loc[missing_guess, "where_guess"] = fills
+    needs_grid = mnd_mask & (
         updated["grid_id"].isna() | (updated["grid_id"] == "RNaNCNaN")
     )
-    if not mask.any():
-        return updated
-    updated.loc[mask, "grid_id"] = updated.loc[
-        mask, "where_guess"
-    ].apply(mnd_where_to_grid)
+    if needs_grid.any():
+        updated.loc[needs_grid, "grid_id"] = updated.loc[
+            needs_grid, "where_guess"
+        ].apply(mnd_where_to_grid)
     return updated
 
 
 def _apply_validation(
     mnd_df: pd.DataFrame,
-    density: pd.DataFrame,
+    grid_density: pd.DataFrame,
+    hour_density: pd.DataFrame,
+    metrics: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """Attach validation scores to MND incidents."""
+    if metrics is None:
+        metrics = {}
+    fallback_key = "validation_sparse_fallbacks"
+    metrics.setdefault(fallback_key, 0)
     if mnd_df.empty:
         mnd_df["validation_score"] = 1.0
         mnd_df["corroborations"] = [[] for _ in range(len(mnd_df))]
         return mnd_df
-    density_map = density.set_index(["grid_id", "hour"]) if not density.empty else None
     scores: list[float] = []
     corroborations: list[list[str]] = []
-    for _, row in mnd_df.iterrows():
-        dt = row.get("dt")
-        grid = row.get("grid_id")
+    fallback_count = metrics[fallback_key]
+    grid_map = None
+    hour_stats = None
+    if not grid_density.empty:
+        grid_density = grid_density.copy()
+        grid_density["hour"] = pd.to_datetime(grid_density["hour"], utc=True)
+        grid_map = grid_density.set_index(["grid_id", "hour"])
+        hour_stats = grid_density.groupby("hour")["count"].agg(["mean", "std"])
+    hour_totals = pd.Series(dtype=float)
+    total_mean = None
+    total_std = None
+    if not hour_density.empty:
+        hour_density = hour_density.copy()
+        hour_density["hour"] = pd.to_datetime(hour_density["hour"], utc=True)
+        hour_totals = hour_density.set_index("hour")["count"]
+        total_mean = hour_totals.mean()
+        total_std = hour_totals.std(ddof=0)
+    for row in mnd_df.itertuples():
+        dt = getattr(row, "dt", None)
+        grid = getattr(row, "grid_id", None)
         if not isinstance(dt, pd.Timestamp):
+            fallback_count += 1
             scores.append(1.0)
             corroborations.append([])
             continue
-        hour = dt.floor("H")
-        if density_map is None:
-            scores.append(1.0)
-            corroborations.append([])
+        hour = dt.floor("h")
+        used_fallback = False
+        if (
+            grid_map is not None
+            and hour_stats is not None
+            and (grid, hour) in grid_map.index
+            and hour in hour_stats.index
+        ):
+            target = grid_map.loc[(grid, hour)]["count"]
+            stats = hour_stats.loc[hour]
+            std = stats["std"]
+            mean = stats["mean"]
+            if pd.isna(std) or std == 0:
+                z_score = 0.0
+            else:
+                z_score = (target - mean) / std
+            validation = max(0.1, min(2.0, 1.0 + z_score))
+            scores.append(validation)
+            corroborations.append([f"OS_ANOM:{z_score:.2f}"])
             continue
-        total_hour = density_map.xs(hour, level="hour", drop_level=False)
-        if total_hour.empty:
-            scores.append(1.0)
-            corroborations.append([])
+        if (
+            not hour_totals.empty
+            and hour in hour_totals.index
+            and total_mean is not None
+        ):
+            total_count = hour_totals.loc[hour]
+            if total_std is None or pd.isna(total_std) or total_std == 0:
+                z_total = 0.0
+            else:
+                z_total = (total_count - total_mean) / total_std
+            validation = max(0.1, min(2.0, 1.0 + z_total))
+            scores.append(validation)
+            corroborations.append([f"OS_TOTAL_ANOM:{z_total:.2f}"])
             continue
-        mean = total_hour["count"].mean()
-        target = density_map.loc[(grid, hour)]["count"] if (grid, hour) in density_map.index else None
-        if target is None or np.isnan(mean) or mean == 0:
-            scores.append(1.0)
-            corroborations.append([])
-            continue
-        deviation = (target - mean) / max(mean, 1.0)
-        validation = max(0.1, min(2.0, 1.0 + deviation))
-        scores.append(validation)
-        corroborations.append([f"OS_ANOM:{deviation:.2f}"])
+        used_fallback = True
+        fallback_count += 1
+        scores.append(1.0)
+        corroborations.append([])
+    metrics[fallback_key] = fallback_count
     mnd_df["validation_score"] = scores
     mnd_df["corroborations"] = corroborations
     return mnd_df
@@ -573,11 +726,18 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     logger.info("Starting extraction phase")
     os_df = extract_opensky(hours=hours, bbox=bbox)
     mnd_rows = scrape_mnd()
+    metrics: dict[str, int] = {
+        "opensky_points": len(os_df),
+        "mnd_rows": len(mnd_rows),
+        "validation_sparse_fallbacks": 0,
+    }
     merged = clean_merge(os_df, mnd_rows)
     merged = _assign_mnd_grids_from_guess(merged)
+    metrics["merged_rows"] = len(merged)
+    grid_density, hour_density = _prepare_validation(os_df)
     mnd_df = merged[merged["source"] == "MND"].copy()
-    density = _prepare_validation(os_df)
-    mnd_df = _apply_validation(mnd_df, density)
+    mnd_df = _apply_validation(mnd_df, grid_density, hour_density, metrics)
+    reset_llm_metrics()
     logger.info("Enriching %s incidents via DeepSeek", len(mnd_df))
     enriched_mnd = enrich_incidents(mnd_df)
     enriched_mnd = _assign_mnd_grids_from_guess(enriched_mnd)
@@ -591,6 +751,19 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     logger.info("Daily grid risk written to %s", grid_risk_path)
     summary = summarize_theater(enriched_mnd, horizon="24h")
     _build_examples(enriched_mnd, summary)
+    metrics["enriched_rows"] = len(enriched_mnd)
+    needs_review_count = 0
+    if "needs_review" in enriched_mnd.columns:
+        review_series = enriched_mnd["needs_review"].fillna(False).astype(bool)
+        needs_review_count = int(review_series.sum())
+    metrics["needs_review_count"] = needs_review_count
+    llm_metrics = get_llm_metrics()
+    metrics["llm_total_calls"] = llm_metrics.total_calls
+    metrics["llm_success"] = llm_metrics.success
+    metrics["llm_invalid_json"] = llm_metrics.invalid_json
+    metrics["llm_retries"] = llm_metrics.retries
+    metrics["llm_fallbacks"] = llm_metrics.fallbacks
+    logger.info("Pipeline metrics: %s", metrics)
 
 
 def simulate_air_ops(
