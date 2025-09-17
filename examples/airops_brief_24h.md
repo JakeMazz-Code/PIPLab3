@@ -1,0 +1,1 @@
+Taiwan gray-zone snapshot for the last 24h: 2 incidents observed. Mean risk score 0.20.
