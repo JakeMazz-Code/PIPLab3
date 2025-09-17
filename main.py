@@ -38,8 +38,12 @@ RAW_DIR = BASE_DIR / "data" / "raw"
 ENRICHED_DIR = BASE_DIR / "data" / "enriched"
 EXAMPLES_DIR = BASE_DIR / "examples"
 
-DEFAULT_BBOX = [118.0, 20.0, 123.0, 26.0]
+BBOX_CORE = [118.0, 20.0, 123.0, 26.0]
+BBOX_WIDE = [115.0, 18.0, 126.0, 28.0]
+BBOX_MAX = [112.0, 16.0, 128.0, 30.0]
+DEFAULT_BBOX = BBOX_CORE
 GRID_STEP = 0.5
+AUTOFALLBACK_THRESHOLD = 2000
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 MND_LIST_URL = "https://www.mnd.gov.tw/PublishTable.aspx"
 MND_PARAMS = {
@@ -126,100 +130,102 @@ def _parse_float(value: Any) -> float | None:
         return None
 
 
-def _compute_grid_id(lat: float | None, lon: float | None) -> str:
-    """Return stable 0.5 deg grid identifier for latitude and longitude."""
+def latlon_to_grid(
+    lat: float | None,
+    lon: float | None,
+    step: float = GRID_STEP,
+) -> str | None:
+    """Map latitude/longitude to a 0.5° grid identifier."""
     if lat is None or lon is None:
-        return "RNaNCNaN"
+        return None
     if not (math.isfinite(lat) and math.isfinite(lon)):
-        return "RNaNCNaN"
-    row = math.floor((lat + 90.0) / GRID_STEP)
-    col = math.floor((lon + 180.0) / GRID_STEP)
+        return None
+    row = math.floor((lat + 90.0) / step)
+    col = math.floor((lon + 180.0) / step)
     return f"R{row}C{col}"
 
 
+def _compute_grid_id(lat: float | None, lon: float | None) -> str:
+    """Backwards-compatible wrapper for grid ID computation."""
+    grid = latlon_to_grid(lat, lon)
+    return grid or "RNaNCNaN"
+
+
+def _lat_to_row(lat: float, step: float = GRID_STEP) -> int:
+    """Convert latitude to grid row index."""
+    return math.floor((lat + 90.0) / step)
+
+
+def _lon_to_col(lon: float, step: float = GRID_STEP) -> int:
+    """Convert longitude to grid column index."""
+    return math.floor((lon + 180.0) / step)
+
+
+GRID_EPSILON = 1e-9
+CORE_ROW_MIN = _lat_to_row(TAIWAN_LAT_MIN)
+CORE_ROW_MAX = _lat_to_row(TAIWAN_LAT_MAX - GRID_EPSILON)
+CORE_COL_MIN = _lon_to_col(TAIWAN_LON_MIN)
+CORE_COL_MAX = _lon_to_col(TAIWAN_LON_MAX - GRID_EPSILON)
+NEIGHBOR_RADIUS_CELLS = int(round(1.0 / GRID_STEP))
+CORE_ROW_MARGIN_MIN = CORE_ROW_MIN - NEIGHBOR_RADIUS_CELLS
+CORE_ROW_MARGIN_MAX = CORE_ROW_MAX + NEIGHBOR_RADIUS_CELLS
+CORE_COL_MARGIN_MIN = CORE_COL_MIN - NEIGHBOR_RADIUS_CELLS
+CORE_COL_MARGIN_MAX = CORE_COL_MAX + NEIGHBOR_RADIUS_CELLS
+
+
+def _grid_to_indices(grid_id: str | None) -> tuple[int | None, int | None]:
+    """Parse a grid identifier into row/column indices."""
+    if not grid_id or not isinstance(grid_id, str):
+        return None, None
+    if not grid_id.startswith("R") or "C" not in grid_id:
+        return None, None
+    try:
+        row_part, col_part = grid_id[1:].split("C", 1)
+        return int(row_part), int(col_part)
+    except (ValueError, TypeError):
+        return None, None
+
+
 def mnd_where_to_grid(where_guess: str | None, step: float = 0.5) -> str:
-
     """Approximate an MND grid cell from a textual location hint."""
-
     if not where_guess:
-
         return "RNaNCNaN"
-
     text = where_guess.lower()
-
     center_lat = (TAIWAN_LAT_MIN + TAIWAN_LAT_MAX) / 2
-
     center_lon = (TAIWAN_LON_MIN + TAIWAN_LON_MAX) / 2
-
     lat = center_lat
-
     lon = center_lon
-
     has_direction = False
-
     median_tokens = (
-
         "median line",
-
         "median-line",
-
         "medianline",
-
-        "\u4e2d\u7dda",
-
-        "\u4e2d\u7ebf",
-
+        "中線",
+        "中线",
     )
-
-    north_tokens = ("north", "northern", "\u5317")
-
-    south_tokens = ("south", "southern", "\u5357")
-
-    east_tokens = ("east", "eastern", "\u6771", "\u4e1c")
-
-    west_tokens = ("west", "western", "\u897f")
-
+    north_tokens = ("north", "northern", "北")
+    south_tokens = ("south", "southern", "南")
+    east_tokens = ("east", "eastern", "東", "东")
+    west_tokens = ("west", "western", "西")
     if any(token in text for token in north_tokens):
-
         lat = min(TAIWAN_LAT_MAX - step / 2, TAIWAN_LAT_MAX - 0.25)
-
         has_direction = True
-
     if any(token in text for token in south_tokens):
-
         lat = max(TAIWAN_LAT_MIN + step / 2, TAIWAN_LAT_MIN + 0.25)
-
         has_direction = True
-
     if any(token in text for token in east_tokens):
-
         lon = min(TAIWAN_LON_MAX - step / 2, TAIWAN_LON_MAX - 0.25)
-
         has_direction = True
-
     if any(token in text for token in west_tokens):
-
         lon = max(TAIWAN_LON_MIN + step / 2, TAIWAN_LON_MIN + 0.25)
-
         has_direction = True
-
     if has_direction:
-
         return _compute_grid_id(lat, lon)
-
     if any(token in text for token in median_tokens):
-
         lat = center_lat
-
         lon = 121.0
-
         return _compute_grid_id(lat, lon)
-
     return "RNaNCNaN"
-
-
-
-
 
 
 def default_mnd_where_guess(timestamp: Any, position: int) -> str:
@@ -304,17 +310,49 @@ def extract_opensky(
     bbox: list | None = None,
 ) -> pd.DataFrame:
     """Fetch OpenSky states and return normalized DataFrame."""
-    bbox = bbox or DEFAULT_BBOX
-    params = {
-        "lamin": bbox[1],
-        "lomax": bbox[3],
-        "lamax": bbox[2],
-        "lomin": bbox[0],
-    }
-    try:
-        data = _fetch_opensky(params)
-    except requests.RequestException as exc:
-        logger.error("OpenSky fetch failed: %s", exc)
+    attempts: list[list[float]]
+    if bbox is None:
+        attempts = [BBOX_WIDE, BBOX_MAX]
+    else:
+        attempts = [bbox]
+    data: dict[str, Any] | None = None
+    states: list[list[Any]] = []
+    for attempt_index, current_bbox in enumerate(attempts):
+        params = {
+            "lamin": current_bbox[1],
+            "lomax": current_bbox[3],
+            "lamax": current_bbox[2],
+            "lomin": current_bbox[0],
+        }
+        try:
+            data = _fetch_opensky(params)
+        except requests.RequestException as exc:
+            logger.error("OpenSky fetch failed: %s", exc)
+            if attempt_index == len(attempts) - 1:
+                return pd.DataFrame(columns=[
+                    "dt",
+                    "lat",
+                    "lon",
+                    "source",
+                    "raw_text",
+                    "country",
+                    "grid_id",
+                ])
+            continue
+        states = data.get("states") or []
+        if (
+            bbox is None
+            and attempt_index == 0
+            and len(states) < AUTOFALLBACK_THRESHOLD
+            and len(attempts) > 1
+        ):
+            logger.info(
+                "OpenSky sparse (%s points) with WIDE bbox; retrying with MAX.",
+                len(states),
+            )
+            continue
+        break
+    if data is None:
         return pd.DataFrame(columns=[
             "dt",
             "lat",
@@ -326,9 +364,8 @@ def extract_opensky(
         ])
     raw_path = RAW_DIR / f"opensky_{_timestamp()}.json"
     _write_json(raw_path, data)
-    states = data.get("states") or []
-    records: list[dict[str, Any]] = []
     window_start = _now_utc() - timedelta(hours=hours)
+    records: list[dict[str, Any]] = []
     for entry in states:
         if not isinstance(entry, list) or len(entry) < 17:
             continue
@@ -340,6 +377,7 @@ def extract_opensky(
         dt = datetime.fromtimestamp(last_contact, tz=timezone.utc)
         if dt < window_start:
             continue
+        grid_id = latlon_to_grid(lat, lon)
         record = {
             "dt": dt,
             "lat": lat,
@@ -347,7 +385,7 @@ def extract_opensky(
             "source": "OpenSky",
             "raw_text": f"icao24={entry[0]} callsign={entry[1]}",
             "country": entry[2],
-            "grid_id": _compute_grid_id(lat, lon),
+            "grid_id": grid_id or "RNaNCNaN",
             "icao24": entry[0],
             "callsign": (entry[1] or "").strip(),
             "velocity": _parse_float(entry[9]),
@@ -568,23 +606,24 @@ def _apply_validation(
     scores: list[float] = []
     corroborations: list[list[str]] = []
     fallback_count = metrics[fallback_key]
-    grid_map = None
-    hour_stats = None
+    grid_counts: dict[tuple[str, pd.Timestamp], float] = {}
     if not grid_density.empty:
-        grid_density = grid_density.copy()
-        grid_density["hour"] = pd.to_datetime(grid_density["hour"], utc=True)
-        grid_map = grid_density.set_index(["grid_id", "hour"])
-        hour_stats = grid_density.groupby("hour")["count"].agg(["mean", "std"])
-    hour_totals = pd.Series(dtype=float)
-    total_mean = None
-    total_std = None
+        local = grid_density.copy()
+        local["hour"] = pd.to_datetime(local["hour"], utc=True)
+        grid_counts = {
+            (row.grid_id, row.hour): float(row.count)
+            for row in local.itertuples()
+        }
+    core_counts = pd.Series(dtype=float)
+    core_mean = None
+    core_std = None
     if not hour_density.empty:
         hour_density = hour_density.copy()
         hour_density["hour"] = pd.to_datetime(hour_density["hour"], utc=True)
-        hour_totals = hour_density.set_index("hour")["count"]
-        total_mean = hour_totals.mean()
-        total_std = hour_totals.std(ddof=0)
-    for row in mnd_df.itertuples():
+        core_counts = hour_density.set_index("hour")["count"].astype(float)
+        core_mean = core_counts.mean()
+        core_std = core_counts.std(ddof=0)
+    for position, row in enumerate(mnd_df.itertuples()):
         dt = getattr(row, "dt", None)
         grid = getattr(row, "grid_id", None)
         if not isinstance(dt, pd.Timestamp):
@@ -593,40 +632,62 @@ def _apply_validation(
             corroborations.append([])
             continue
         hour = dt.floor("h")
-        used_fallback = False
+        row_idx, col_idx = _grid_to_indices(grid)
         if (
-            grid_map is not None
-            and hour_stats is not None
-            and (grid, hour) in grid_map.index
-            and hour in hour_stats.index
+            row_idx is None
+            or col_idx is None
+            or row_idx < CORE_ROW_MARGIN_MIN
+            or row_idx > CORE_ROW_MARGIN_MAX
+            or col_idx < CORE_COL_MARGIN_MIN
+            or col_idx > CORE_COL_MARGIN_MAX
         ):
-            target = grid_map.loc[(grid, hour)]["count"]
-            stats = hour_stats.loc[hour]
-            std = stats["std"]
-            mean = stats["mean"]
-            if pd.isna(std) or std == 0:
+            fallback_count += 1
+            scores.append(1.0)
+            corroborations.append([])
+            continue
+        neighbors = [
+            f"R{r}C{c}"
+            for r in range(
+                row_idx - NEIGHBOR_RADIUS_CELLS,
+                row_idx + NEIGHBOR_RADIUS_CELLS + 1,
+            )
+            for c in range(
+                col_idx - NEIGHBOR_RADIUS_CELLS,
+                col_idx + NEIGHBOR_RADIUS_CELLS + 1,
+            )
+        ]
+        neighbor_values = [
+            grid_counts.get((neighbor, hour), 0.0)
+            for neighbor in neighbors
+        ]
+        neighbor_total = float(sum(neighbor_values))
+        if neighbor_total >= 15:
+            counts_array = np.array(neighbor_values, dtype=float)
+            mean = counts_array.mean()
+            std = counts_array.std(ddof=0)
+            target_count = grid_counts.get((grid, hour), 0.0)
+            if std == 0 or np.isnan(std):
                 z_score = 0.0
             else:
-                z_score = (target - mean) / std
+                z_score = (target_count - mean) / std
             validation = max(0.1, min(2.0, 1.0 + z_score))
             scores.append(validation)
-            corroborations.append([f"OS_ANOM:{z_score:.2f}"])
+            corroborations.append([f"OS_LOCAL:{z_score:.2f}"])
             continue
         if (
-            not hour_totals.empty
-            and hour in hour_totals.index
-            and total_mean is not None
+            not core_counts.empty
+            and hour in core_counts.index
+            and core_mean is not None
         ):
-            total_count = hour_totals.loc[hour]
-            if total_std is None or pd.isna(total_std) or total_std == 0:
+            total_count = core_counts.loc[hour]
+            if core_std is None or np.isnan(core_std) or core_std == 0:
                 z_total = 0.0
             else:
-                z_total = (total_count - total_mean) / total_std
+                z_total = (total_count - core_mean) / core_std
             validation = max(0.1, min(2.0, 1.0 + z_total))
             scores.append(validation)
-            corroborations.append([f"OS_TOTAL_ANOM:{z_total:.2f}"])
+            corroborations.append([f"OS_CORE:{z_total:.2f}"])
             continue
-        used_fallback = True
         fallback_count += 1
         scores.append(1.0)
         corroborations.append([])
@@ -642,27 +703,28 @@ def _write_enriched(df: pd.DataFrame, prefix: str | None) -> Path:
     label = prefix or "incidents"
     parquet_path = ENRICHED_DIR / f"{label}_enriched_{stamp}.parquet"
     try:
-        df.to_parquet(parquet_path, index=False)
+        _atomic_write_parquet(df, parquet_path)
         return parquet_path
-    except (ImportError, ValueError) as exc:
+    except (ImportError, ModuleNotFoundError, ValueError) as exc:
         logger.warning("Parquet write failed (%s); falling back to CSV", exc)
         csv_path = parquet_path.with_suffix(".csv")
-        df.to_csv(csv_path, index=False)
+        _atomic_write_csv(df, csv_path)
         return csv_path
 
 
 def _write_daily_grid_risk(df: pd.DataFrame) -> Path:
     """Write daily grid risk summary CSV."""
+    path = ENRICHED_DIR / "daily_grid_risk.csv"
     if df.empty or "risk_score" not in df.columns:
-        path = ENRICHED_DIR / "daily_grid_risk.csv"
-        pd.DataFrame()
+        empty = pd.DataFrame(columns=["day", "grid_id", "risk_score"])
+        _atomic_write_csv(empty, path)
         return path
     enriched = df.copy()
     enriched["dt"] = pd.to_datetime(enriched["dt"], utc=True)
     enriched = enriched.dropna(subset=["dt"])
     if enriched.empty:
-        path = ENRICHED_DIR / "daily_grid_risk.csv"
-        pd.DataFrame().to_csv(path, index=False)
+        empty = pd.DataFrame(columns=["day", "grid_id", "risk_score"])
+        _atomic_write_csv(empty, path)
         return path
     enriched["day"] = enriched["dt"].dt.floor("D")
     grouped = (
@@ -670,8 +732,7 @@ def _write_daily_grid_risk(df: pd.DataFrame) -> Path:
         .mean()
         .reset_index()
     )
-    path = ENRICHED_DIR / "daily_grid_risk.csv"
-    grouped.to_csv(path, index=False)
+    _atomic_write_csv(grouped, path)
     return path
 
 
@@ -894,5 +955,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
 
 
