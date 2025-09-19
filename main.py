@@ -44,7 +44,9 @@ BBOX_WIDE = [115.0, 18.0, 126.0, 28.0]
 BBOX_MAX = [112.0, 16.0, 128.0, 30.0]
 DEFAULT_BBOX = BBOX_CORE
 GRID_STEP = 0.5
-AUTOFALLBACK_THRESHOLD = 2000
+THRESH_OS_MIN = 50  # retry with MAX when points are extremely sparse
+_AUTO_RETRY_MAX_RAW = os.getenv("AUTO_RETRY_MAX", "false").lower()
+AUTO_RETRY_MAX_ENABLED = _AUTO_RETRY_MAX_RAW in {"1", "true", "t", "yes", "y"}
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 MND_LIST_URL = "https://www.mnd.gov.tw/PublishTable.aspx"
 MND_PARAMS = {
@@ -357,60 +359,51 @@ def extract_opensky(
     bbox: list | None = None,
 ) -> pd.DataFrame:
     """Fetch OpenSky states and return normalized DataFrame."""
-    attempts: list[list[float]]
-    if bbox is None:
-        attempts = [BBOX_WIDE, BBOX_MAX]
-    else:
-        attempts = [bbox]
-    data: dict[str, Any] | None = None
-    states: list[list[Any]] = []
-    for attempt_index, current_bbox in enumerate(attempts):
-        params = {
-            "lamin": current_bbox[1],
-            "lomax": current_bbox[3],
-            "lamax": current_bbox[2],
-            "lomin": current_bbox[0],
+    empty_columns = [
+        "dt",
+        "lat",
+        "lon",
+        "source",
+        "raw_text",
+        "country",
+        "grid_id",
+    ]
+    target_bbox = bbox or BBOX_WIDE
+    params = {
+        "lamin": target_bbox[1],
+        "lomax": target_bbox[3],
+        "lamax": target_bbox[2],
+        "lomin": target_bbox[0],
+    }
+    try:
+        data = _fetch_opensky(params)
+    except requests.RequestException as exc:
+        logger.error("OpenSky fetch failed: %s", exc)
+        return pd.DataFrame(columns=empty_columns)
+    states = data.get("states") or []
+    auto_retry = AUTO_RETRY_MAX_ENABLED and bbox is None
+    if auto_retry and len(states) < THRESH_OS_MIN:
+        logger.info(
+            "OpenSky sparse (%s points); retrying once with MAX bbox.",
+            len(states),
+        )
+        max_params = {
+            "lamin": BBOX_MAX[1],
+            "lomax": BBOX_MAX[3],
+            "lamax": BBOX_MAX[2],
+            "lomin": BBOX_MAX[0],
         }
         try:
-            data = _fetch_opensky(params)
+            data_max = _fetch_opensky(max_params)
         except requests.RequestException as exc:
-            logger.error("OpenSky fetch failed: %s", exc)
-            if attempt_index == len(attempts) - 1:
-                return pd.DataFrame(columns=[
-                    "dt",
-                    "lat",
-                    "lon",
-                    "source",
-                    "raw_text",
-                    "country",
-                    "grid_id",
-                ])
-            continue
-        states = data.get("states") or []
-        if (
-            bbox is None
-            and attempt_index == 0
-            and len(states) < AUTOFALLBACK_THRESHOLD
-            and len(attempts) > 1
-        ):
-            logger.info(
-                "OpenSky sparse (%s points) with WIDE bbox; retrying with MAX.",
-                len(states),
-            )
-            continue
-        break
-    if data is None:
-        return pd.DataFrame(columns=[
-            "dt",
-            "lat",
-            "lon",
-            "source",
-            "raw_text",
-            "country",
-            "grid_id",
-        ])
+            logger.error("OpenSky MAX retry failed: %s", exc)
+        else:
+            data = data_max
+            states = data_max.get("states") or []
     raw_path = RAW_DIR / f"opensky_{_timestamp()}.json"
     _write_json(raw_path, data)
+    if not states:
+        return pd.DataFrame(columns=empty_columns)
     window_start = _now_utc() - timedelta(hours=hours)
     records: list[dict[str, Any]] = []
     for entry in states:
@@ -440,18 +433,11 @@ def extract_opensky(
         }
         records.append(record)
     if not records:
-        return pd.DataFrame(columns=[
-            "dt",
-            "lat",
-            "lon",
-            "source",
-            "raw_text",
-            "country",
-            "grid_id",
-        ])
+        return pd.DataFrame(columns=empty_columns)
     df = pd.DataFrame(records)
     df["dt"] = pd.to_datetime(df["dt"], utc=True)
     return df
+
 
 
 @retry(
