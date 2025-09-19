@@ -966,6 +966,150 @@ def render_arcade_tab(
             st.pyplot(fig)
 
 
+def _build_history_day_payload(
+    date_label: str,
+    history_df: pd.DataFrame,
+    hours: int,
+    only_mnd: bool,
+) -> dict[str, Any]:
+    """Prepare playback payload for a history day."""
+    window_df = _filter_window(history_df, hours)
+    display_df = window_df
+    if only_mnd and "source" in display_df.columns:
+        display_df = display_df[
+            display_df["source"].astype(str) == "MND"
+        ]
+    arcade_df = _prepare_arcade_metrics(display_df)
+    if arcade_df.empty:
+        total_points = 0
+        os_mean = 0.0
+        anomalies = 0
+    else:
+        total_points = int(arcade_df["row_points"].sum())
+        os_mean = float(arcade_df["os_anom"].mean())
+        anomalies = int(arcade_df["os_anom"].gt(0).sum())
+    if "source" in history_df.columns:
+        mnd_count = int(history_df["source"].astype(str).eq("MND").sum())
+    else:
+        mnd_count = 0
+    return {
+        "date": date_label,
+        "history_df": history_df,
+        "window_df": window_df,
+        "display_df": display_df,
+        "arcade_df": arcade_df,
+        "total_points": total_points,
+        "os_mean": os_mean,
+        "mnd_count": mnd_count,
+        "anomalies": anomalies,
+        "window_hours": hours,
+    }
+
+
+
+def _prepare_history_day_entry(
+    entry: dict[str, Any],
+    hours: int,
+    only_mnd: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Load a manifest entry and build playback payload."""
+    incident_path = Path(entry["incident_path"])
+    try:
+        mtime = incident_path.stat().st_mtime
+    except OSError as exc:
+        return None, f"Failed to access incidents for {entry['date']}: {exc}"
+    history_df = _load_parquet_df(str(incident_path), mtime)
+    if history_df.empty:
+        return None, f"Failed to load incidents for {entry['date']}."
+    payload = _build_history_day_payload(
+        entry["date"], history_df, hours, only_mnd
+    )
+    return payload, None
+
+
+
+def _render_history_day_header(
+    placeholder: Any,
+    day_data: dict[str, Any],
+) -> None:
+    """Render window header and KPI cards for a history day."""
+    hours = int(day_data.get("window_hours", 24))
+    with placeholder.container():
+        _window_header(day_data["display_df"], hours)
+        card_cols = st.columns(3)
+        card_cols[0].metric(
+            "Total points", f"{day_data['total_points']:,}"
+        )
+        card_cols[1].metric(
+            "Mean OS_ANOM", f"{day_data['os_mean']:.2f}"
+        )
+        card_cols[2].metric("MND incidents", day_data["mnd_count"])
+
+
+
+def _render_history_day_map(
+    placeholder: Any,
+    day_data: dict[str, Any],
+    cutoff: float,
+    only_mnd: bool,
+    map_layer: str,
+) -> None:
+    """Render analyst map for a history day."""
+    hours = int(day_data.get("window_hours", 24))
+    with placeholder.container():
+        render_analyst_tab(
+            day_data["window_df"],
+            day_data["display_df"],
+            hours,
+            cutoff,
+            only_mnd,
+            map_layer,
+            None,
+        )
+
+
+
+def _render_history_day_view(
+    header_placeholder: Any,
+    map_placeholder: Any,
+    day_data: dict[str, Any],
+    cutoff: float,
+    only_mnd: bool,
+    map_layer: str,
+) -> None:
+    """Render header metrics and map for a history day."""
+    _render_history_day_header(header_placeholder, day_data)
+    _render_history_day_map(
+        map_placeholder,
+        day_data,
+        cutoff,
+        only_mnd,
+        map_layer,
+    )
+
+
+
+def _prepare_snapshot_day(only_mnd: bool) -> dict[str, Any] | None:
+    """Build playback payload for the latest enriched 24h snapshot."""
+    parquet_path = _latest_parquet(ENRICHED_DIR)
+    if parquet_path is None:
+        return None
+    try:
+        parquet_mtime = parquet_path.stat().st_mtime
+    except OSError:
+        return None
+    snapshot_df = _load_parquet_df(str(parquet_path), parquet_mtime)
+    if snapshot_df.empty:
+        return None
+    return _build_history_day_payload(
+        "Latest 24h snapshot",
+        snapshot_df,
+        24,
+        only_mnd,
+    )
+
+
+
 def render_history_tab(
     manifest: dict[str, Any],
     hours: int,
@@ -977,157 +1121,192 @@ def render_history_tab(
     if not entries:
         st.info("No history data available.")
         return
+
+    available_days = len(entries)
     date_options = [entry["date"] for entry in entries]
-    max_days = len(entries)
-    default_window = min(7, max_days)
+    selected_key = "history_selected_date"
     if (
-        "history_selected_date" not in st.session_state
-        or st.session_state["history_selected_date"] not in date_options
+        selected_key not in st.session_state
+        or st.session_state[selected_key] not in date_options
     ):
-        st.session_state["history_selected_date"] = date_options[-1]
-    st.session_state.setdefault("history_playback_days", default_window)
-    lookback = st.slider(
-        "Playback range (days)",
-        min_value=1,
-        max_value=max_days,
-        value=st.session_state["history_playback_days"],
-        key="history_playback_days",
+        st.session_state[selected_key] = date_options[-1]
+
+    slider_key = "history_playback_days"
+    max_slider = min(30, available_days)
+    if max_slider >= 3:
+        default_window = min(7, max_slider)
+        st.session_state.setdefault(slider_key, default_window)
+        current = st.session_state[slider_key]
+        current = max(3, min(current, max_slider))
+        if current != st.session_state[slider_key]:
+            st.session_state[slider_key] = current
+        lookback = st.slider(
+            "Lookback (days)",
+            min_value=3,
+            max_value=max_slider,
+            value=st.session_state[slider_key],
+            key=slider_key,
+        )
+    else:
+        lookback = max_slider
+        st.caption("Lookback locked to available history.")
+        st.session_state[slider_key] = lookback
+
+    snapshot_key = "history_show_snapshot"
+    st.session_state.setdefault(snapshot_key, True)
+    show_snapshot = st.checkbox(
+        "Show 24h snapshot",
+        value=st.session_state[snapshot_key],
+        key=snapshot_key,
     )
-    selected = st.selectbox(
+
+    selected_date = st.selectbox(
         "History date (UTC)",
         date_options,
-        index=date_options.index(st.session_state["history_selected_date"]),
-        key="history_selected_date",
+        index=date_options.index(st.session_state[selected_key]),
+        key=selected_key,
     )
+
     entry_lookup = {entry["date"]: entry for entry in entries}
-    entry = entry_lookup.get(selected)
-    if entry is None:
-        st.warning("History entry not found.")
-        return
-    incident_path = Path(entry["incident_path"])
-    try:
-        history_mtime = incident_path.stat().st_mtime
-    except OSError as exc:
-        st.error(f"Failed to access incidents for {selected}: {exc}")
-        return
-    history_df = _load_parquet_df(str(incident_path), history_mtime)
-    if history_df.empty:
-        st.error(f"Failed to load incidents for {selected}.")
-        return
-    filtered_df = _filter_window(history_df, hours)
-    display_df = filtered_df
-    if only_mnd and "source" in display_df.columns:
-        display_df = display_df[
-            display_df["source"].astype(str) == "MND"
-        ]
-    _window_header(display_df, hours)
-    arcade_df = _prepare_arcade_metrics(display_df)
-    if arcade_df.empty:
-        total_points = 0
-        os_mean = 0.0
-    else:
-        total_points = int(arcade_df["row_points"].sum())
-        os_mean = float(arcade_df["os_anom"].mean())
-    if "source" in history_df.columns:
-        mnd_mask = history_df["source"].astype(str) == "MND"
-        mnd_count = int(mnd_mask.sum())
-    else:
-        mnd_count = 0
-    card_cols = st.columns(3)
-    card_cols[0].metric("Total points", f"{total_points:,}")
-    card_cols[1].metric("Mean OS_ANOM", f"{os_mean:.2f}")
-    card_cols[2].metric("MND incidents", mnd_count)
     playback_entries = entries[-lookback:]
+    day_cache: dict[str, dict[str, Any]] = {}
     summary_rows: list[dict[str, Any]] = []
     trend_rows: list[dict[str, Any]] = []
-    for trend_entry in playback_entries:
-        trend_path = Path(trend_entry["incident_path"])
-        try:
-            trend_mtime = trend_path.stat().st_mtime
-        except OSError:
+
+    for playback_entry in playback_entries:
+        day_data, error = _prepare_history_day_entry(
+            playback_entry, hours, only_mnd
+        )
+        if day_data is None:
             continue
-        trend_df = _load_parquet_df(str(trend_path), trend_mtime)
-        if trend_df.empty:
-            continue
-        day_summary = compute_points_per_day(trend_df)
+        day_cache[day_data["date"]] = day_data
+        day_summary = compute_points_per_day(day_data["history_df"])
         if not day_summary.empty:
             for _, day_row in day_summary.iterrows():
-                date_value = str(
-                    day_row.get("date", trend_entry["date"])
-                )
                 summary_rows.append(
                     {
-                        "date": date_value,
+                        "date": str(
+                            day_row.get("date", day_data["date"])
+                        ),
                         "points": int(day_row.get("points", 0)),
                         "os_anom_mean": float(
                             day_row.get("os_anom_mean", float("nan"))
                         ),
                     }
                 )
-        trend_filtered = _filter_window(trend_df, hours)
-        if only_mnd and "source" in trend_filtered.columns:
-            trend_filtered = trend_filtered[
-                trend_filtered["source"].astype(str) == "MND"
-            ]
-        trend_metrics = _prepare_arcade_metrics(trend_filtered)
-        points = (
-            int(trend_metrics["row_points"].sum())
-            if not trend_metrics.empty
-            else 0
-        )
-        anomalies = (
-            int(trend_metrics["os_anom"].gt(0).sum())
-            if not trend_metrics.empty
-            else 0
-        )
         trend_rows.append(
             {
-                "date": trend_entry["date"],
-                "points": points,
-                "anomalies": anomalies,
+                "date": day_data["date"],
+                "points": day_data["total_points"],
+                "anomalies": day_data["anomalies"],
             }
         )
-    if summary_rows:
-        summary_df = pd.DataFrame(summary_rows)
-    else:
-        summary_df = pd.DataFrame(
+
+    selected_entry = entry_lookup.get(selected_date)
+    selected_day = day_cache.get(selected_date)
+    if selected_day is None and selected_entry is not None:
+        selected_day, error = _prepare_history_day_entry(
+            selected_entry, hours, only_mnd
+        )
+        if selected_day is None:
+            message = error or (
+                f"Failed to load incidents for {selected_date}."
+            )
+            st.error(message)
+            return
+        day_cache[selected_day["date"]] = selected_day
+
+    if selected_day is None:
+        st.warning("History entry not found.")
+        return
+
+    header_placeholder = st.empty()
+    summary_df = (
+        pd.DataFrame(summary_rows)
+        if summary_rows
+        else pd.DataFrame(
             columns=["date", "points", "os_anom_mean"]
         )
+    )
+    _render_history_day_header(header_placeholder, selected_day)
     st.subheader("History summary")
     _render_history_summary(summary_df)
     if trend_rows:
         trend_df_plot = pd.DataFrame(trend_rows).set_index("date")
         st.subheader(f"Playback summary (last {lookback} days)")
         st.line_chart(trend_df_plot)
-    render_analyst_tab(
-        filtered_df, display_df, hours, cutoff, only_mnd, map_layer, None
+
+    map_placeholder = st.empty()
+    _render_history_day_map(
+        map_placeholder,
+        selected_day,
+        cutoff,
+        only_mnd,
+        map_layer,
     )
-    if len(playback_entries) > 1 and st.button(
-        f"Play last {lookback} days",
-        key="history_play_button",
-    ):
-        placeholder = st.empty()
-        for playback_entry in playback_entries:
-            message_parts = [playback_entry["date"]]
-            matching = [
-                row
-                for row in trend_rows
-                if row["date"] == playback_entry["date"]
-            ]
-            if matching:
-                message_parts.append(
-                    f"{matching[0]['points']:,} points"
+    status_placeholder = st.empty()
+    snapshot_placeholder = st.empty()
+    trend_lookup = {
+        row["date"]: (row["points"], row["anomalies"])
+        for row in trend_rows
+    }
+    playback_dates = [
+        entry["date"]
+        for entry in playback_entries
+        if entry["date"] in day_cache
+    ]
+    if len(playback_dates) > 1:
+        if st.button("Play timelapse", key="history_play_button"):
+            snapshot_placeholder.empty()
+            for date in playback_dates:
+                day_data = day_cache.get(date)
+                if day_data is None:
+                    continue
+                _render_history_day_view(
+                    header_placeholder,
+                    map_placeholder,
+                    day_data,
+                    cutoff,
+                    only_mnd,
+                    map_layer,
                 )
-                message_parts.append(
-                    f"{matching[0]['anomalies']} anomalies"
+                points, anomalies = trend_lookup.get(date, (0, 0))
+                status_placeholder.info(
+                    f"{date}: {points:,} points, {anomalies} anomalies"
                 )
-            placeholder.info(" | ".join(message_parts))
-            st.session_state["history_selected_date"] = playback_entry["date"]
-            time.sleep(0.6)
-        placeholder.success(
-            f"Playback finished. Showing {playback_entries[-1]['date']}."
+                st.session_state[selected_key] = date
+            final_date = playback_dates[-1]
+            st.session_state[selected_key] = final_date
+            status_placeholder.success(
+                f"Playback finished. Showing {final_date}."
+            )
+            if show_snapshot:
+                snapshot_data = _prepare_snapshot_day(only_mnd)
+                if snapshot_data is not None:
+                    with snapshot_placeholder.container():
+                        st.markdown("---")
+                        st.subheader("Latest 24h snapshot")
+                        snap_header = st.empty()
+                        snap_map = st.empty()
+                        _render_history_day_header(
+                            snap_header, snapshot_data
+                        )
+                        _render_history_day_map(
+                            snap_map,
+                            snapshot_data,
+                            cutoff,
+                            only_mnd,
+                            map_layer,
+                        )
+                else:
+                    snapshot_placeholder.info(
+                        "24h snapshot unavailable."
+                    )
+    else:
+        status_placeholder.info(
+            "Not enough history to play a timelapse."
         )
-        st.experimental_rerun()
+        snapshot_placeholder.empty()
 
 
 def main() -> None:
