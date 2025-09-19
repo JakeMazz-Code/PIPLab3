@@ -220,6 +220,41 @@ def _filter_window(df: pd.DataFrame, hours: int) -> pd.DataFrame:
     window_start = latest - timedelta(hours=hours)
     return df[df["dt"] >= window_start]
 
+def _apply_filters(
+    df: pd.DataFrame,
+    sources: Iterable[str],
+    sev_min: float,
+    sev_max: float,
+    categories: Iterable[str],
+) -> pd.DataFrame:
+    """Apply sidebar filters to the incident window."""
+    if df.empty:
+        return df
+    working = df.copy()
+    if "risk_score" in working.columns:
+        working["risk_score"] = pd.to_numeric(
+            working["risk_score"], errors="coerce"
+        )
+    if "severity_0_5" in working.columns:
+        working["severity_0_5"] = pd.to_numeric(
+            working["severity_0_5"], errors="coerce"
+        )
+    allowed_sources = {str(item) for item in sources if item}
+    if "source" in working.columns and allowed_sources:
+        working = working[
+            working["source"].astype(str).isin(allowed_sources)
+        ]
+    if "severity_0_5" in working.columns:
+        severity_series = working["severity_0_5"]
+        mask = severity_series.between(sev_min, sev_max, inclusive="both")
+        if sev_min <= 0.0 and sev_max >= 5.0:
+            mask = mask | severity_series.isna()
+        working = working[mask]
+    allowed_categories = {str(item) for item in categories if item}
+    if allowed_categories and "category" in working.columns:
+        category_series = working["category"].astype(str)
+        working = working[category_series.isin(allowed_categories)]
+    return working
 
 def load_artifacts(
     parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
@@ -563,7 +598,7 @@ def render_brief(df: pd.DataFrame, brief_text: str | None) -> None:
 
 
 def render_analyst_tab(
-    df: pd.DataFrame,
+    source_df: pd.DataFrame,
     window_df: pd.DataFrame,
     hours: int,
     cutoff: float,
@@ -575,15 +610,21 @@ def render_analyst_tab(
     render_heatmap(window_df, map_layer)
 
     st.subheader("Watch cells")
-    watch_source = _filter_window(df, hours)
-    watch_df = _watch_cells(watch_source, cutoff, only_mnd, top_k=5)
+    if source_df.empty:
+        watch_df = pd.DataFrame()
+    else:
+        watch_df = _watch_cells(source_df, cutoff, only_mnd, top_k=5)
     if watch_df.empty:
         st.info("No data in window.")
     else:
         st.dataframe(watch_df)
 
     st.subheader("MND incidents")
-    mnd_table = _filter_window(df[df["source"] == "MND"], hours)
+    if source_df.empty or "source" not in source_df.columns:
+        mnd_table = pd.DataFrame()
+    else:
+        mnd_mask = source_df["source"].astype(str) == "MND"
+        mnd_table = source_df[mnd_mask].copy()
     columns = [
         "dt",
         "grid_id",
@@ -865,7 +906,7 @@ def render_history_tab(
         st.subheader(f"Playback summary (last {lookback} days)")
         st.line_chart(trend_df_plot)
     render_analyst_tab(
-        history_df, display_df, hours, cutoff, only_mnd, map_layer, None
+        filtered_df, display_df, hours, cutoff, only_mnd, map_layer, None
     )
     if len(playback_entries) > 1 and st.button(
         f"Play last {lookback} days",
@@ -921,16 +962,64 @@ def main() -> None:
     )
     only_mnd = sidebar.checkbox("Only MND cells")
 
-    display_df = window_df
-    if only_mnd:
-        display_df = window_df[window_df["source"] == "MND"]
+    if "source" in window_df.columns:
+        source_options = sorted(
+            {
+                str(item)
+                for item in window_df["source"].dropna().unique()
+            }
+        )
+    else:
+        source_options = []
+    if not source_options:
+        source_options = ["MND", "OpenSky"]
+    selected_sources = sidebar.multiselect(
+        "Sources",
+        source_options,
+        default=source_options,
+    )
+    severity_min, severity_max = sidebar.slider(
+        "Severity range",
+        min_value=0.0,
+        max_value=5.0,
+        value=(0.0, 5.0),
+        step=0.1,
+    )
+    category_options: list[str] = []
+    if "category" in window_df.columns:
+        category_series = window_df["category"].dropna().astype(str)
+        category_options = sorted(
+            {
+                item.strip()
+                for item in category_series
+                if item.strip()
+            }
+        )
+    selected_categories = sidebar.multiselect(
+        "Categories",
+        category_options,
+        default=category_options,
+    )
+    filtered_window = _apply_filters(
+        window_df,
+        selected_sources,
+        severity_min,
+        severity_max,
+        selected_categories,
+    )
+    display_df = filtered_window
+    if only_mnd and "source" in display_df.columns:
+        display_df = display_df[
+            display_df["source"].astype(str) == "MND"
+        ]
 
     manifest = _load_history_manifest(HISTORY_INDEX_PATH)
     analyst_tab, arcade_tab, history_tab = st.tabs(["Analyst", "Arcade", "History"])
     with analyst_tab:
         _window_header(display_df, hours)
         render_analyst_tab(
-            df, display_df, hours, cutoff, only_mnd, map_layer, brief_text
+            filtered_window, display_df, hours, cutoff, only_mnd, map_layer,
+            brief_text
         )
     with arcade_tab:
         _window_header(display_df, hours)
