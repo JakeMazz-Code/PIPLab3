@@ -66,7 +66,8 @@ def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _watch_cells(df: pd.DataFrame, cutoff: float, only_mnd: bool) -> pd.DataFrame:
+def _watch_cells(
+    df: pd.DataFrame, cutoff: float, only_mnd: bool) -> pd.DataFrame:
     scope = df[df["risk_score"].notna()].copy()
     if only_mnd:
         scope = scope[scope["source"] == "MND"]
@@ -114,7 +115,8 @@ def _filter_window(df: pd.DataFrame, hours: int) -> pd.DataFrame:
     return df[df["dt"] >= window_start]
 
 
-def load_artifacts(parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
+def load_artifacts(
+    parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
     parquet_path = _latest_parquet(parquet_dir)
     if parquet_path is None:
         st.error("No enriched parquet files found.")
@@ -129,7 +131,9 @@ def load_artifacts(parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str |
     else:
         risk_df = pd.read_csv(risk_path)
     brief_path = EXAMPLES_DIR / "airops_brief_24h.md"
-    brief_text = brief_path.read_text(encoding="utf-8") if brief_path.exists() else None
+    brief_text = None
+    if brief_path.exists():
+        brief_text = brief_path.read_text(encoding="utf-8")
     return df, risk_df, brief_text
 
 
@@ -161,7 +165,9 @@ def render_anomaly_chart(df: pd.DataFrame) -> None:
         st.info("No validation scores available for chart.")
         return
     chart_df["dt_hour"] = chart_df["dt"].dt.floor("H")
-    grouped = chart_df.groupby("dt_hour")["validation_score"].mean().reset_index()
+    grouped = (
+        chart_df.groupby("dt_hour")["validation_score"].mean().reset_index()
+    )
     if grouped.empty:
         st.info("No validation data in selected window.")
         return
@@ -196,8 +202,12 @@ def main() -> None:
         return
 
     sidebar = st.sidebar
-    hours = sidebar.slider("Time window (hours)", min_value=6, max_value=48, value=24)
-    cutoff = sidebar.slider("Risk cutoff", min_value=0.0, max_value=1.0, value=0.35, step=0.05)
+    hours = sidebar.slider(
+        "Time window (hours)", min_value=6, max_value=48, value=24
+    )
+    cutoff = sidebar.slider(
+        "Risk cutoff", min_value=0.0, max_value=1.0, value=0.35, step=0.05
+    )
     only_mnd = sidebar.checkbox("Only MND cells")
 
     window_df = _filter_window(df, hours)

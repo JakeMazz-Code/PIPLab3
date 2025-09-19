@@ -35,23 +35,31 @@ def _load_enriched() -> pd.DataFrame:
     return df
 
 
-def _grid_sets(df: pd.DataFrame, day: datetime) -> tuple[set[str], dict[str, float]]:
+def _grid_sets(
+    df: pd.DataFrame, day: datetime
+) -> tuple[set[str], dict[str, float]]:
     window_start = day - timedelta(days=3)
     window_end = day
     window = df[(df["dt"] >= window_start) & (df["dt"] < window_end)]
     window = window.copy()
-    window["risk_score"] = pd.to_numeric(window.get("risk_score"), errors="coerce")
+    window["risk_score"] = pd.to_numeric(
+        window.get("risk_score"), errors="coerce"
+    )
     forecast = (
         window.groupby("grid_id")["risk_score"].mean().dropna()
     )
     day_rows = df[(df["dt"] >= day) & (df["dt"] < day + timedelta(days=1))]
     observed = {
-        grid for grid in day_rows[day_rows["source"] == "MND"]["grid_id"] if grid
+        grid
+        for grid in day_rows[day_rows["source"] == "MND"]["grid_id"]
+        if grid
     }
     return observed, forecast.to_dict()
 
 
-def _select_hotspots(forecast: dict[str, float], cutoff: float | None, top_k: int | None) -> set[str]:
+def _select_hotspots(
+    forecast: dict[str, float], cutoff: float | None, top_k: int | None
+) -> set[str]:
     if not forecast:
         return set()
     items = sorted(forecast.items(), key=lambda pair: pair[1], reverse=True)
@@ -61,7 +69,9 @@ def _select_hotspots(forecast: dict[str, float], cutoff: float | None, top_k: in
     return {grid for grid, score in items if score >= threshold}
 
 
-def _confusion(predicted: set[str], observed: set[str], universe: set[str]) -> tuple[int, int, int, int]:
+def _confusion(
+    predicted: set[str], observed: set[str], universe: set[str]
+) -> tuple[int, int, int, int]:
     tp = len(predicted & observed)
     fp = len(predicted - observed)
     fn = len(observed - predicted)
@@ -69,7 +79,9 @@ def _confusion(predicted: set[str], observed: set[str], universe: set[str]) -> t
     return tp, fp, fn, tn
 
 
-def _brier(forecast: dict[str, float], observed: set[str], universe: set[str]) -> float:
+def _brier(
+    forecast: dict[str, float], observed: set[str], universe: set[str]
+) -> float:
     scores = []
     for grid in universe:
         prob = forecast.get(grid, 0.0)
@@ -82,7 +94,9 @@ def _safe_ratio(numer: float, denom: float) -> float:
     return numer / denom if denom else 0.0
 
 
-def backtest(days: int, cutoff: float | None, top_k: int | None) -> dict[str, float]:
+def backtest(
+    days: int, cutoff: float | None, top_k: int | None
+) -> dict[str, float]:
     df = _load_enriched()
     df = df.sort_values("dt")
     all_days = sorted({row.date() for row in df["dt"]})
@@ -93,7 +107,9 @@ def backtest(days: int, cutoff: float | None, top_k: int | None) -> dict[str, fl
     confusion_totals = [0, 0, 0, 0]
 
     for day_date in selected_days:
-        day = datetime.combine(day_date, datetime.min.time(), tzinfo=timezone.utc)
+        day = datetime.combine(
+            day_date, datetime.min.time(), tzinfo=timezone.utc
+        )
         observed, forecast = _grid_sets(df, day)
         predicted = _select_hotspots(forecast, cutoff, top_k)
         if not forecast and not observed:
@@ -162,17 +178,27 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Backtest grid risk forecasts over recent days",
     )
-    parser.add_argument("--days", type=int, default=10, help="Number of days to score")
+    parser.add_argument(
+        "--days", type=int, default=10, help="Number of days to score"
+    )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--cutoff", type=float, default=0.35, help="Risk cutoff for hotspot selection")
-    group.add_argument("--top-k", type=int, default=None, help="Top K grids to flag each day")
+    group.add_argument(
+        "--cutoff", type=float, default=0.35,
+        help="Risk cutoff for hotspot selection"
+    )
+    group.add_argument(
+        "--top-k", type=int, default=None,
+        help="Top K grids to flag each day"
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        metrics = backtest(args.days, args.cutoff if args.top_k is None else None, args.top_k)
+        metrics = backtest(
+            args.days, args.cutoff if args.top_k is None else None, args.top_k
+        )
     except Exception as exc:
         print(f"Backtest failed: {exc}")
         return 1

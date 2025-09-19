@@ -46,14 +46,15 @@ def coerce_values(metrics: dict[str, str]) -> dict[str, int | float | str]:
     result: dict[str, int | float | str] = {}
     for key, value in metrics.items():
         try:
-            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                result[key] = int(value)
-                continue
-            result[key] = float(value)
+            result[key] = int(value)
             continue
         except ValueError:
-            pass
-        result[key] = value
+            try:
+                result[key] = float(value)
+                continue
+            except ValueError:
+                result[key] = value
+    return result
     return result
 
 
