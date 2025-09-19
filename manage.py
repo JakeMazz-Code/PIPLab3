@@ -15,7 +15,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 def _run_subprocess(label: str, args: List[str]) -> int:
     """Run a subprocess and emit a one-line status message."""
-    result = subprocess.run(args, check=False)
+    result = subprocess.run(args, check=False, cwd=REPO_ROOT)
     code = result.returncode
     print(f"[{label}] exit code {code}")
     return code
