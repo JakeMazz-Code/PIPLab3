@@ -55,7 +55,6 @@ def coerce_values(metrics: dict[str, str]) -> dict[str, int | float | str]:
             except ValueError:
                 result[key] = value
     return result
-    return result
 
 
 def parse_args() -> argparse.Namespace:
