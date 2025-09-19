@@ -407,8 +407,37 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
     if map_df.empty:
         st.info("No grid centroids available for map display.")
         return
+    watchlist = _load_watchlist(WATCHLIST_PATH)
+    starred_coords: list[dict[str, float | str]] = []
+    for grid_id in watchlist:
+        centroid = _grid_to_centroid(grid_id)
+        if centroid is None:
+            continue
+        starred_coords.append(
+            {
+                "grid_id": grid_id,
+                "lat": centroid[0],
+                "lon": centroid[1],
+            }
+        )
+    selected_grid = st.session_state.get("selected_grid")
+    selected_coord: dict[str, float | str] | None = None
+    if isinstance(selected_grid, str):
+        centroid = _grid_to_centroid(selected_grid)
+        if centroid is not None:
+            selected_coord = {
+                "grid_id": selected_grid,
+                "lat": centroid[0],
+                "lon": centroid[1],
+            }
     if pdk is None:
-        st.map(map_df.rename(columns={"lat": "latitude", "lon": "longitude"}))
+        st.map(
+            map_df.rename(columns={"lat": "latitude", "lon": "longitude"})
+        )
+        if selected_coord is not None:
+            st.caption(f"Focused grid: {selected_coord['grid_id']}")
+        elif starred_coords:
+            st.caption(f"Starred grids: {len(starred_coords)}")
         return
     layers = []
     tooltip = {
@@ -458,6 +487,38 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         zoom=5.2,
         pitch=30,
     )
+    if starred_coords:
+        star_df = pd.DataFrame(starred_coords)
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=star_df,
+                get_position="[lon, lat]",
+                get_radius=1,
+                radius_scale=9000,
+                radius_min_pixels=8,
+                filled=False,
+                get_line_color=[255, 255, 255, 255],
+                line_width_min_pixels=2,
+                pickable=False,
+            )
+        )
+    if selected_coord is not None:
+        focus_df = pd.DataFrame([selected_coord])
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=focus_df,
+                get_position="[lon, lat]",
+                get_radius=1,
+                radius_scale=14000,
+                radius_min_pixels=12,
+                filled=False,
+                get_line_color=[255, 215, 0, 240],
+                line_width_min_pixels=3,
+                pickable=False,
+            )
+        )
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
