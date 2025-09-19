@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -58,15 +59,38 @@ TAIWAN_LON_MIN = 118.0
 TAIWAN_LON_MAX = 123.0
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically write *data* to *path*."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode='wb', delete=False, dir=path.parent, suffix='.tmp'
+    ) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    try:
+        tmp_path.replace(path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+
 def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
     """Write a parquet file atomically."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         delete=False, dir=path.parent, suffix='.tmp'
     ) as tmp:
         tmp_path = Path(tmp.name)
     try:
         df.to_parquet(tmp_path, index=False)
+        with tmp_path.open('rb') as handle:
+            os.fsync(handle.fileno())
         tmp_path.replace(path)
     except Exception:
         if tmp_path.exists():
@@ -75,20 +99,39 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 
 
-def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
+def _atomic_write_df_csv(df: pd.DataFrame, path: Path) -> None:
     """Write a CSV file atomically."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        delete=False, dir=path.parent, suffix='.tmp'
+        mode='w', encoding='utf-8', newline='', delete=False, dir=path.parent,
+        suffix='.tmp'
     ) as tmp:
+        df.to_csv(tmp, index=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())
         tmp_path = Path(tmp.name)
     try:
-        df.to_csv(tmp_path, index=False)
         tmp_path.replace(path)
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         raise
+
+
+
+def _atomic_write_text(path: Path, text: str, encoding: str = 'utf-8') -> None:
+    """Atomically write text to *path*."""
+    data = text.encode(encoding)
+    _atomic_write_bytes(path, data)
+
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Atomically write JSON data to *path*."""
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+    _atomic_write_bytes(path, payload)
+
 
 
 def _ensure_directories() -> None:
@@ -100,9 +143,11 @@ def _ensure_directories() -> None:
 _ensure_directories()
 
 
+
 def _now_utc() -> datetime:
     """Return current UTC datetime."""
     return datetime.now(timezone.utc)
+
 
 
 def _timestamp() -> str:
@@ -110,14 +155,16 @@ def _timestamp() -> str:
     return _now_utc().strftime("%Y%m%d%H")
 
 
-def _write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+
+def _write_text(path: Path, content: str, encoding: str = 'utf-8') -> None:
     """Write *content* to *path* with safe encoding."""
-    path.write_text(content, encoding=encoding)
+    _atomic_write_text(path, content, encoding=encoding)
+
 
 
 def _write_json(path: Path, data: Any) -> None:
     """Write JSON data with UTF-8 encoding."""
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    _atomic_write_json(path, data)
 
 
 def _parse_float(value: Any) -> float | None:
@@ -672,7 +719,8 @@ def _apply_validation(
                 z_score = (target_count - mean) / std
             validation = max(0.1, min(2.0, 1.0 + z_score))
             scores.append(validation)
-            corroborations.append([f"OS_LOCAL:{z_score:.2f}"])
+            tag = f"OS_ANOM:{z_score:.2f}"
+            corroborations.append([tag])
             continue
         if (
             not core_counts.empty
@@ -686,7 +734,8 @@ def _apply_validation(
                 z_total = (total_count - core_mean) / core_std
             validation = max(0.1, min(2.0, 1.0 + z_total))
             scores.append(validation)
-            corroborations.append([f"OS_CORE:{z_total:.2f}"])
+            tag = f"OS_ANOM:{z_total:.2f}"
+            corroborations.append([tag])
             continue
         fallback_count += 1
         scores.append(1.0)
@@ -708,7 +757,7 @@ def _write_enriched(df: pd.DataFrame, prefix: str | None) -> Path:
     except (ImportError, ModuleNotFoundError, ValueError) as exc:
         logger.warning("Parquet write failed (%s); falling back to CSV", exc)
         csv_path = parquet_path.with_suffix(".csv")
-        _atomic_write_csv(df, csv_path)
+        _atomic_write_df_csv(df, csv_path)
         return csv_path
 
 
@@ -717,14 +766,14 @@ def _write_daily_grid_risk(df: pd.DataFrame) -> Path:
     path = ENRICHED_DIR / "daily_grid_risk.csv"
     if df.empty or "risk_score" not in df.columns:
         empty = pd.DataFrame(columns=["day", "grid_id", "risk_score"])
-        _atomic_write_csv(empty, path)
+        _atomic_write_df_csv(empty, path)
         return path
     enriched = df.copy()
     enriched["dt"] = pd.to_datetime(enriched["dt"], utc=True)
     enriched = enriched.dropna(subset=["dt"])
     if enriched.empty:
         empty = pd.DataFrame(columns=["day", "grid_id", "risk_score"])
-        _atomic_write_csv(empty, path)
+        _atomic_write_df_csv(empty, path)
         return path
     enriched["day"] = enriched["dt"].dt.floor("D")
     grouped = (
@@ -732,7 +781,7 @@ def _write_daily_grid_risk(df: pd.DataFrame) -> Path:
         .mean()
         .reset_index()
     )
-    _atomic_write_csv(grouped, path)
+    _atomic_write_df_csv(grouped, path)
     return path
 
 
@@ -784,6 +833,7 @@ def _build_examples(df: pd.DataFrame, summary: str) -> None:
 
 def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     """Execute full ETL + enrichment pipeline."""
+    start_time = time.perf_counter()
     logger.info("Starting extraction phase")
     os_df = extract_opensky(hours=hours, bbox=bbox)
     mnd_rows = scrape_mnd()
@@ -824,7 +874,33 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     metrics["llm_invalid_json"] = llm_metrics.invalid_json
     metrics["llm_retries"] = llm_metrics.retries
     metrics["llm_fallbacks"] = llm_metrics.fallbacks
-    logger.info("Pipeline metrics: %s", metrics)
+    os_anom_rows = 0
+    if "corroborations" in combined.columns:
+        mnd_mask = combined["source"].eq("MND")
+        if mnd_mask.any():
+            corrs = combined.loc[mnd_mask, "corroborations"]
+
+            def _contains_os_anom(value: Any) -> bool:
+                if isinstance(value, str):
+                    return "OS_ANOM" in value
+                if isinstance(value, (list, tuple, set)):
+                    return any("OS_ANOM" in str(item) for item in value)
+                return "OS_ANOM" in str(value)
+
+            os_anom_rows = int(corrs.apply(_contains_os_anom).sum())
+    metrics["os_anom_rows"] = os_anom_rows
+    metrics["wall_ms"] = int((time.perf_counter() - start_time) * 1000)
+    metrics_line = (
+        "METRICS | opensky_points={opensky_points} "
+        "mnd_rows={mnd_rows} merged_rows={merged_rows} "
+        "enriched_rows={enriched_rows} llm_success={llm_success} "
+        "llm_invalid_json={llm_invalid_json} llm_retries={llm_retries} "
+        "needs_review_count={needs_review_count} "
+        "validation_sparse_fallbacks={validation_sparse_fallbacks} "
+        "os_anom_rows={os_anom_rows} wall_ms={wall_ms}"
+    ).format(**metrics)
+    print(metrics_line)
+
 
 
 def simulate_air_ops(
@@ -865,7 +941,7 @@ def _run_simulation(runs: int, seed: int | None) -> None:
     df = _load_enriched(latest)
     sim_df = simulate_air_ops(df, n_runs=runs, seed=seed)
     path = ENRICHED_DIR / "simulation_runs.csv"
-    sim_df.to_csv(path, index=False)
+    _atomic_write_df_csv(sim_df, path)
     logger.info("Simulation results written to %s", path)
 
 

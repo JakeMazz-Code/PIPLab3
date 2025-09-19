@@ -1,4 +1,4 @@
-# Air & Sea Gray-Zone Monitor — Agents Guide
+# Air & Sea Gray-Zone Monitor - Agents Guide
 
 Purpose
 This file gives AI coding agents (and humans) the exact context, rules,
@@ -47,16 +47,17 @@ same structure.
 
 ```
 grayzone-tw/
-├── main.py
-├── deepseek_enrichment.py
-├── data/
-│   ├── raw/
-├── examples/
-├── requirements.txt
-├── README.md
-├── DEEPSEEK_USAGE.md
-├── AI_USAGE.md
-└── .gitignore
+- main.py
+- deepseek_enrichment.py
+- data/
+  - raw/
+  - enriched/
+- examples/
+- requirements.txt
+- README.md
+- DEEPSEEK_USAGE.md
+- AI_USAGE.md
+- .gitignore
 ```
 
 Do not rename these baseline files.
@@ -395,7 +396,7 @@ print(df.groupby(dec)["risk_score"].mean().round(3).to_list())
 
 Implement without editing baseline files:
 
-1) Streamlit UI — app.py
+1) Streamlit UI - app.py
    - Controls: bbox (display), time window (last N hours), risk cutoff.
    - Panels: heatmap (from daily_grid_risk.csv), watch cells,
      MND table, OpenSky anomaly chart, LLM brief.
@@ -403,7 +404,7 @@ Implement without editing baseline files:
      daily_grid_risk.csv.
    - Read-only from data/enriched/ and examples/.
 
-2) Backtest — scripts/backtest.py
+2) Backtest - scripts/backtest.py
    - Build D-day risk from D-3..D-1; evaluate vs D-day MND rows.
    - Outputs: examples/backtest_confusion_matrix.png,
      examples/skill_metrics.json.
@@ -420,17 +421,17 @@ python scripts/backtest.py --days 10
 
 Keep a dev/codex_prompts.md with these intents:
 
-- Patch A — OpenSky WIDE + Local Anomaly
+- Patch A - OpenSky WIDE + Local Anomaly
   Extract with WIDE by default; score anomalies locally around CORE grids;
   log counters; optional one-shot retry with MAX when sparse.
 
-- Patch A.1 — METRICS consolidation
+- Patch A.1 - METRICS consolidation
   One final METRICS line including os_anom_rows and wall_ms.
 
-- Patch S1 — Streamlit Core Demo UI
+- Patch S1 - Streamlit Core Demo UI
   Read-only from enriched artifacts; heatmap + KPIs + brief.
 
-- Patch S2 — Scenario Player and Backtest
+- Patch S2 - Scenario Player and Backtest
   6-hour playback; backtest over last N days; write confusion matrix and
   skill metrics; add UX polish (disclaimers, KPIs).
 
