@@ -625,6 +625,29 @@ def render_analyst_tab(
     else:
         mnd_mask = source_df["source"].astype(str) == "MND"
         mnd_table = source_df[mnd_mask].copy()
+    focus_options: list[str] = []
+    if not mnd_table.empty and "grid_id" in mnd_table.columns:
+        focus_series = mnd_table["grid_id"].dropna().astype(str)
+        focus_options = sorted(
+            {item.strip() for item in focus_series if item.strip()}
+        )
+    if focus_options:
+        current_focus = st.session_state.get("selected_grid")
+        if (
+            isinstance(current_focus, str)
+            and current_focus in focus_options
+        ):
+            default_index = focus_options.index(current_focus)
+        else:
+            default_index = 0
+        focus_choice = st.selectbox(
+            "Focus grid",
+            focus_options,
+            index=default_index,
+        )
+        if focus_choice != current_focus:
+            st.session_state["selected_grid"] = focus_choice
+
     columns = [
         "dt",
         "grid_id",
