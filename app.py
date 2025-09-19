@@ -33,7 +33,10 @@ OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
 
 
 def _latest_parquet(directory: Path) -> Path | None:
-    candidates = list(directory.glob("*.parquet"))
+    try:
+        candidates = list(directory.glob("*.parquet"))
+    except Exception:
+        return None
     if not candidates:
         return None
     candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
@@ -271,27 +274,43 @@ def _apply_filters(
 
 
 def load_artifacts(
-    parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
+    parquet_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
     parquet_path = _latest_parquet(parquet_dir)
     if parquet_path is None:
         st.error("No enriched parquet files found.")
         return pd.DataFrame(), pd.DataFrame(), None
-    df = pd.read_parquet(parquet_path)
-    risk_path = parquet_dir / "daily_grid_risk.csv"
-    if not risk_path.exists():
-        risk_path = Path("data/enriched/daily_grid_risk.csv")
-    if not risk_path.exists():
-        st.error("daily_grid_risk.csv not found.")
+    try:
+        parquet_mtime = parquet_path.stat().st_mtime
+    except OSError:
+        parquet_mtime = time.time()
+    df = _load_parquet_df(str(parquet_path), parquet_mtime)
+    if df.empty:
+        st.error("Failed to load incidents parquet.")
+        return pd.DataFrame(), pd.DataFrame(), None
+    risk_candidates = [
+        parquet_dir / "daily_grid_risk.csv",
+        Path("data/enriched/daily_grid_risk.csv"),
+    ]
+    risk_df = pd.DataFrame()
+    for candidate in risk_candidates:
+        if not candidate.exists():
+            continue
+        try:
+            risk_mtime = candidate.stat().st_mtime
+        except OSError:
+            risk_mtime = time.time()
+        risk_df = _load_csv_df(str(candidate), risk_mtime)
+        if not risk_df.empty:
+            break
         risk_df = pd.DataFrame()
     else:
-        risk_df = pd.read_csv(risk_path)
+        st.error("daily_grid_risk.csv not found.")
     brief_path = EXAMPLES_DIR / "airops_brief_24h.md"
     brief_text = None
     if brief_path.exists():
         brief_text = brief_path.read_text(encoding="utf-8")
     return df, risk_df, brief_text
-
-
 def _atomic_write_json(path: Path, payload: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -410,6 +429,21 @@ def _prepare_arcade_metrics(window_df: pd.DataFrame) -> pd.DataFrame:
     base_points = base_points + is_mnd.astype(float) * 5.0
     arcade_df["row_points"] = base_points.round().astype(int)
     return arcade_df
+
+
+@st.cache_data(ttl=60)
+def _load_parquet_df(path_str: str, mtime: float) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path_str)
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def _load_csv_df(path_str: str, mtime: float) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path_str)
+    except Exception:
+        return pd.DataFrame()
 
 
 def _row_points(row: pd.Series) -> int:
@@ -972,9 +1006,13 @@ def render_history_tab(
         return
     incident_path = Path(entry["incident_path"])
     try:
-        history_df = pd.read_parquet(incident_path)
-    except Exception as exc:
-        st.error(f"Failed to load incidents for {selected}: {exc}")
+        history_mtime = incident_path.stat().st_mtime
+    except OSError as exc:
+        st.error(f"Failed to access incidents for {selected}: {exc}")
+        return
+    history_df = _load_parquet_df(str(incident_path), history_mtime)
+    if history_df.empty:
+        st.error(f"Failed to load incidents for {selected}.")
         return
     filtered_df = _filter_window(history_df, hours)
     display_df = filtered_df
@@ -1003,9 +1041,13 @@ def render_history_tab(
     summary_rows: list[dict[str, Any]] = []
     trend_rows: list[dict[str, Any]] = []
     for trend_entry in playback_entries:
+        trend_path = Path(trend_entry["incident_path"])
         try:
-            trend_df = pd.read_parquet(trend_entry["incident_path"])
-        except Exception:
+            trend_mtime = trend_path.stat().st_mtime
+        except OSError:
+            continue
+        trend_df = _load_parquet_df(str(trend_path), trend_mtime)
+        if trend_df.empty:
             continue
         day_summary = compute_points_per_day(trend_df)
         if not day_summary.empty:
