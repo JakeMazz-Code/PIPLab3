@@ -130,7 +130,10 @@ def _watch_cells(
     scope = df.copy()
     if only_mnd and "source" in scope.columns:
         scope = scope[scope["source"].astype(str) == "MND"]
-    scope["risk_score"] = pd.to_numeric(scope.get("risk_score"), errors="coerce")
+    scope["risk_score"] = pd.to_numeric(
+        scope.get("risk_score"),
+        errors="coerce",
+    )
     scope = scope.dropna(subset=["risk_score"])
     if scope.empty:
         return scope.iloc[0:0]
@@ -144,13 +147,21 @@ def _watch_cells(
     )
     filtered = grouped[grouped["mean_risk"] >= cutoff]
     if filtered.empty:
-        filtered = grouped.sort_values("mean_risk", ascending=False).head(top_k)
+        filtered = grouped.sort_values(
+            "mean_risk",
+            ascending=False,
+        ).head(top_k)
     else:
-        filtered = filtered.sort_values("mean_risk", ascending=False).head(top_k)
+        filtered = filtered.sort_values(
+            "mean_risk",
+            ascending=False,
+        ).head(top_k)
     if filtered.empty:
         return grouped.iloc[0:0]
     filtered["last_seen"] = filtered["last_seen"].dt.tz_convert("UTC")
-    filtered["last_seen"] = filtered["last_seen"].dt.strftime("%Y-%m-%d %H:%MZ")
+    filtered["last_seen"] = filtered["last_seen"].dt.strftime(
+        "%Y-%m-%d %H:%MZ"
+    )
     filtered["mean_risk"] = filtered["mean_risk"].round(3)
     return filtered.reset_index()
 
@@ -164,7 +175,6 @@ def _window_header(df: pd.DataFrame, hours: int) -> None:
     st.caption(f"Window: last {hours}h | rows: {total} (MND: {mnd_count})")
 
 
-
 def _suggest_cutoff(df: pd.DataFrame) -> float | None:
     if df.empty or "risk_score" not in df.columns:
         return None
@@ -172,7 +182,6 @@ def _suggest_cutoff(df: pd.DataFrame) -> float | None:
     if series.empty:
         return None
     return float(series.quantile(0.75))
-
 
 
 def _friendly_summary(value: Any) -> str:
@@ -189,7 +198,10 @@ def _sample_actors(values: Iterable[Any]) -> str:
             continue
         if isinstance(value, (list, tuple, set)):
             candidates = value
-        elif hasattr(value, '__iter__') and not isinstance(value, (str, bytes)):
+        elif (
+            hasattr(value, '__iter__')
+            and not isinstance(value, (str, bytes))
+        ):
             try:
                 candidates = list(value)
             except TypeError:
@@ -219,6 +231,7 @@ def _filter_window(df: pd.DataFrame, hours: int) -> pd.DataFrame:
         return df
     window_start = latest - timedelta(hours=hours)
     return df[df["dt"] >= window_start]
+
 
 def _apply_filters(
     df: pd.DataFrame,
@@ -255,6 +268,7 @@ def _apply_filters(
         category_series = working["category"].astype(str)
         working = working[category_series.isin(allowed_categories)]
     return working
+
 
 def load_artifacts(
     parquet_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
@@ -300,7 +314,6 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
         raise
 
 
-
 def _load_watchlist(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -313,12 +326,10 @@ def _load_watchlist(path: Path) -> list[str]:
     return []
 
 
-
 def _save_watchlist(path: Path, grids: Iterable[str]) -> list[str]:
     unique = sorted({str(item) for item in grids if item})
     _atomic_write_json(path, unique)
     return unique
-
 
 
 def _extract_os_anom(value: Any) -> float:
@@ -334,7 +345,6 @@ def _extract_os_anom(value: Any) -> float:
             except ValueError:
                 continue
     return 0.0
-
 
 
 def _compute_streaks(df: pd.DataFrame, cutoff: float) -> dict[str, int]:
@@ -364,7 +374,6 @@ def _compute_streaks(df: pd.DataFrame, cutoff: float) -> dict[str, int]:
         if streak:
             streaks[str(grid_id)] = streak
     return streaks
-
 
 
 def _prepare_arcade_metrics(window_df: pd.DataFrame) -> pd.DataFrame:
@@ -403,6 +412,115 @@ def _prepare_arcade_metrics(window_df: pd.DataFrame) -> pd.DataFrame:
     return arcade_df
 
 
+def _row_points(row: pd.Series) -> int:
+    """Compute arcade points for a single incident row."""
+    risk = pd.to_numeric(row.get("risk_score"), errors="coerce")
+    severity = pd.to_numeric(row.get("severity_0_5"), errors="coerce")
+    risk_value = float(risk) if pd.notna(risk) else 0.0
+    severity_value = float(severity) if pd.notna(severity) else 0.0
+    os_anom = _extract_os_anom(row.get("corroborations"))
+    os_bonus = min(max(os_anom, 0.0), 3.0)
+    points = risk_value * 100.0
+    points += os_bonus * 20.0
+    points += severity_value * 10.0
+    source_label = str(row.get("source", "")).strip()
+    if source_label == "MND":
+        points += 5.0
+    return int(round(points))
+
+
+def compute_points_per_day(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate arcade points and OS_ANOM mean per day."""
+    base = pd.DataFrame(columns=["date", "points", "os_anom_mean"])
+    if df.empty or "dt" not in df.columns:
+        return base
+    working = df.copy()
+    working["dt"] = pd.to_datetime(working["dt"], utc=True, errors="coerce")
+    working = working.dropna(subset=["dt"])
+    if working.empty:
+        return base
+    working["date"] = working["dt"].dt.strftime("%Y-%m-%d")
+    working["row_points"] = working.apply(_row_points, axis=1)
+    points = working.groupby("date")["row_points"].sum()
+    os_mean = pd.Series(dtype=float)
+    if ("source" in working.columns and "validation_score" in working.columns):
+        mnd_mask = working["source"].astype(str) == "MND"
+        scores = pd.to_numeric(
+            working.loc[mnd_mask, "validation_score"], errors="coerce"
+        )
+        os_mean = (
+            pd.DataFrame(
+                {
+                    "date": working.loc[mnd_mask, "date"],
+                    "score": scores,
+                }
+            )
+            .dropna(subset=["score"])
+            .groupby("date")["score"]
+            .mean()
+        )
+    result = points.rename("points").reset_index()
+    if not os_mean.empty:
+        result = result.merge(
+            os_mean.rename("os_anom_mean").reset_index(),
+            on="date",
+            how="left",
+        )
+    else:
+        result["os_anom_mean"] = float("nan")
+    result["points"] = result["points"].astype(int)
+    result["os_anom_mean"] = result["os_anom_mean"].astype(float)
+    return result
+
+
+def _render_history_summary(summary: pd.DataFrame) -> None:
+    """Render points/day and OS_ANOM mean/day chart for history."""
+    if summary.empty or "date" not in summary.columns:
+        st.info("Not enough history to summarize.")
+        return
+    summary = summary.dropna(subset=["date"])
+    if summary.empty:
+        st.info("Not enough history to summarize.")
+        return
+    summary = summary.groupby("date").agg(
+        points=("points", "sum"),
+        os_anom_mean=("os_anom_mean", "mean"),
+    ).reset_index()
+    summary = summary.sort_values("date")
+    dates = pd.to_datetime(summary["date"], errors="coerce")
+    valid = pd.notna(dates)
+    if not valid.any():
+        st.info("Not enough history to summarize.")
+        return
+    summary = summary.loc[valid].reset_index(drop=True)
+    dates = dates[valid]
+    fig, ax_points = plt.subplots(figsize=(6, 2.4))
+    ax_points.plot(
+        dates,
+        summary["points"],
+        marker="o",
+        color="tab:orange",
+        label="Points/day",
+    )
+    ax_points.set_ylabel("Points/day")
+    ax_points.set_xlabel("Day")
+    ax_points.grid(True, axis="y", alpha=0.3)
+    ax_os = ax_points.twinx()
+    ax_os.plot(
+        dates,
+        summary["os_anom_mean"],
+        marker="s",
+        color="tab:blue",
+        label="OS_ANOM mean",
+    )
+    ax_os.set_ylabel("OS_ANOM mean")
+    fig.autofmt_xdate(rotation=45)
+    lines = ax_points.get_lines() + ax_os.get_lines()
+    labels = [line.get_label() for line in lines]
+    ax_points.legend(lines, labels, loc="upper left")
+    st.pyplot(fig)
+    plt.close(fig)
+
 
 def _load_history_manifest(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -431,7 +549,6 @@ def _load_history_manifest(path: Path) -> dict[str, Any]:
             }
         )
     return {"days": normalized}
-
 
 
 def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
@@ -584,7 +701,6 @@ def render_anomaly_chart(df: pd.DataFrame) -> None:
     st.pyplot(fig)
 
 
-
 def render_brief(df: pd.DataFrame, brief_text: str | None) -> None:
     if brief_text:
         st.markdown(brief_text)
@@ -608,7 +724,6 @@ def render_analyst_tab(
 ) -> None:
     st.subheader("Heatmap")
     render_heatmap(window_df, map_layer)
-
     st.subheader("Watch cells")
     if source_df.empty:
         watch_df = pd.DataFrame()
@@ -618,7 +733,6 @@ def render_analyst_tab(
         st.info("No data in window.")
     else:
         st.dataframe(watch_df)
-
     st.subheader("MND incidents")
     if source_df.empty or "source" not in source_df.columns:
         mnd_table = pd.DataFrame()
@@ -647,7 +761,6 @@ def render_analyst_tab(
         )
         if focus_choice != current_focus:
             st.session_state["selected_grid"] = focus_choice
-
     columns = [
         "dt",
         "grid_id",
@@ -664,14 +777,14 @@ def render_analyst_tab(
         if column not in display_table.columns:
             display_table[column] = ""
     if "summary_one_line" in display_table.columns:
-        display_table["summary_one_line"] = display_table["summary_one_line"].apply(
+        display_table["summary_one_line"] = display_table[
+            "summary_one_line"
+        ].apply(
             _friendly_summary
         )
     st.dataframe(display_table[columns])
-
     st.subheader("MND anomaly chart")
     render_anomaly_chart(mnd_table)
-
     st.subheader("LLM brief (24h)")
     render_brief(mnd_table, brief_text)
 
@@ -686,7 +799,6 @@ def render_arcade_tab(
     if arcade_df.empty:
         st.info("No incidents in the selected window.")
         return
-
     total_points = int(arcade_df["row_points"].sum())
     level = total_points // 500
     progress = total_points % 500
@@ -697,7 +809,6 @@ def render_arcade_tab(
     score_cols[2].metric("Rows scored", len(arcade_df))
     st.progress(progress / 500 if total_points else 0.0)
     st.caption(f"{progress}/500 to next level")
-
     streaks = _compute_streaks(window_df, cutoff)
     last_seen = arcade_df.groupby("grid_id")["dt"].max()
     st.subheader("Streaks")
@@ -720,7 +831,6 @@ def render_arcade_tab(
         st.dataframe(streak_table.reset_index(drop=True))
     else:
         st.info("No grids are above the cutoff consecutively.")
-
     watchlist = _load_watchlist(watchlist_path)
     available_grids = sorted(
         {str(item) for item in arcade_df["grid_id"].dropna()}
@@ -732,7 +842,6 @@ def render_arcade_tab(
     if set(starred) != set(watchlist):
         starred = _save_watchlist(watchlist_path, starred)
         st.success("Watchlist updated.")
-
     points_by_grid = arcade_df.groupby("grid_id")["row_points"].sum()
     risk_by_grid = arcade_df.groupby("grid_id")["risk_score"].mean()
     star_rows: list[dict[str, Any]] = []
@@ -759,7 +868,6 @@ def render_arcade_tab(
         st.dataframe(pd.DataFrame(star_rows))
     else:
         st.info("Star grids to build a watchlist.")
-
     starred_above_cutoff = sum(
         1 for grid_id in starred if risk_by_grid.get(grid_id, 0.0) >= cutoff
     )
@@ -778,7 +886,6 @@ def render_arcade_tab(
     for name, status in badge_status:
         marker = "[x]" if status else "[ ]"
         st.write(f"{marker} {name}")
-
     st.subheader("Visuals")
     vis_cols = st.columns([2, 1, 1])
     with vis_cols[0]:
@@ -823,7 +930,6 @@ def render_arcade_tab(
             ax.set_ylabel("Actor")
             ax.set_title("Top actors")
             st.pyplot(fig)
-
 
 
 def render_history_tab(
@@ -877,7 +983,6 @@ def render_history_tab(
             display_df["source"].astype(str) == "MND"
         ]
     _window_header(display_df, hours)
-
     arcade_df = _prepare_arcade_metrics(display_df)
     if arcade_df.empty:
         total_points = 0
@@ -895,12 +1000,28 @@ def render_history_tab(
     card_cols[1].metric("Mean OS_ANOM", f"{os_mean:.2f}")
     card_cols[2].metric("MND incidents", mnd_count)
     playback_entries = entries[-lookback:]
+    summary_rows: list[dict[str, Any]] = []
     trend_rows: list[dict[str, Any]] = []
     for trend_entry in playback_entries:
         try:
             trend_df = pd.read_parquet(trend_entry["incident_path"])
         except Exception:
             continue
+        day_summary = compute_points_per_day(trend_df)
+        if not day_summary.empty:
+            for _, day_row in day_summary.iterrows():
+                date_value = str(
+                    day_row.get("date", trend_entry["date"])
+                )
+                summary_rows.append(
+                    {
+                        "date": date_value,
+                        "points": int(day_row.get("points", 0)),
+                        "os_anom_mean": float(
+                            day_row.get("os_anom_mean", float("nan"))
+                        ),
+                    }
+                )
         trend_filtered = _filter_window(trend_df, hours)
         if only_mnd and "source" in trend_filtered.columns:
             trend_filtered = trend_filtered[
@@ -924,6 +1045,14 @@ def render_history_tab(
                 "anomalies": anomalies,
             }
         )
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+    else:
+        summary_df = pd.DataFrame(
+            columns=["date", "points", "os_anom_mean"]
+        )
+    st.subheader("History summary")
+    _render_history_summary(summary_df)
     if trend_rows:
         trend_df_plot = pd.DataFrame(trend_rows).set_index("date")
         st.subheader(f"Playback summary (last {lookback} days)")
@@ -959,16 +1088,13 @@ def render_history_tab(
         st.experimental_rerun()
 
 
-
 def main() -> None:
     st.set_page_config(page_title="Gray-Zone Monitor", layout="wide")
     st.title("Gray-Zone Air & Sea Monitor")
     st.caption("Display bbox focus: CORE 118,20,123,26")
-
     df, risk_df, brief_text = load_artifacts(ENRICHED_DIR)
     if df.empty:
         return
-
     sidebar = st.sidebar
     hours = sidebar.slider(
         "Time window (hours)", min_value=6, max_value=48, value=24
@@ -984,7 +1110,6 @@ def main() -> None:
         "Map layer", ("Heatmap", "Hexagons", "Points"), index=0
     )
     only_mnd = sidebar.checkbox("Only MND cells")
-
     if "source" in window_df.columns:
         source_options = sorted(
             {
@@ -1035,9 +1160,10 @@ def main() -> None:
         display_df = display_df[
             display_df["source"].astype(str) == "MND"
         ]
-
     manifest = _load_history_manifest(HISTORY_INDEX_PATH)
-    analyst_tab, arcade_tab, history_tab = st.tabs(["Analyst", "Arcade", "History"])
+    analyst_tab, arcade_tab, history_tab = st.tabs(
+        ["Analyst", "Arcade", "History"]
+    )
     with analyst_tab:
         _window_header(display_df, hours)
         render_analyst_tab(
@@ -1049,7 +1175,6 @@ def main() -> None:
         render_arcade_tab(display_df, cutoff, WATCHLIST_PATH, map_layer)
     with history_tab:
         render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
-
     sidebar.markdown("---")
     latest_parquet = _latest_parquet(ENRICHED_DIR)
     if latest_parquet is not None:
