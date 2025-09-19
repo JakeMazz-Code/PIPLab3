@@ -175,7 +175,23 @@ def _window_header(df: pd.DataFrame, hours: int) -> None:
         mnd_count = int(df["source"].astype(str).eq("MND").sum())
     else:
         mnd_count = 0
-    st.caption(f"Window: last {hours}h | rows: {total} (MND: {mnd_count})")
+
+    range_text = None
+    if hours >= 24 and not df.empty and "dt" in df.columns:
+        dt_series = pd.to_datetime(df["dt"], utc=True, errors="coerce")
+        dt_series = dt_series.dropna()
+        if not dt_series.empty:
+            start = dt_series.min()
+            end = dt_series.max()
+            range_text = (
+                f"Window: {start.strftime('%Y-%m-%d %H:%MZ')} -> "
+                f"{end.strftime('%Y-%m-%d %H:%MZ')} (~{hours}h)"
+            )
+
+    if range_text is None:
+        range_text = f"Window: last {hours}h"
+
+    st.caption(f"{range_text} | rows: {total} (MND: {mnd_count})")
 
 
 def _suggest_cutoff(df: pd.DataFrame) -> float | None:
