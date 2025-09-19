@@ -273,6 +273,93 @@ def _apply_filters(
     return working
 
 
+def compute_kpis(
+    df_window: pd.DataFrame,
+    df_prev: pd.DataFrame | None = None,
+) -> dict[str, str | float]:
+    """Compute KPI metrics for the analyst dashboard."""
+    result: dict[str, str | float] = {
+        "mnd_count": 0.0,
+        "mean_risk": float("nan"),
+        "mean_os_anom": float("nan"),
+        "top_actor": "",
+        "d_mnd": float("nan"),
+        "d_mean_risk": float("nan"),
+        "d_mean_os_anom": float("nan"),
+    }
+    if df_window.empty:
+        return result
+    def _aggregate(frame: pd.DataFrame) -> tuple[float, float, float]:
+        if frame.empty:
+            return 0.0, float("nan"), float("nan")
+        working = frame.copy()
+        if "risk_score" in working.columns:
+            working["risk_score"] = pd.to_numeric(
+                working["risk_score"], errors="coerce"
+            )
+        risk_mean = float("nan")
+        if "risk_score" in working.columns:
+            risk_series = working["risk_score"].dropna()
+            if not risk_series.empty:
+                risk_mean = float(risk_series.mean())
+        if "source" in working.columns:
+            mnd_mask = working["source"].astype(str) == "MND"
+            mnd_count = float(mnd_mask.sum())
+            mnd_rows = working[mnd_mask].copy()
+        else:
+            mnd_count = 0.0
+            mnd_rows = pd.DataFrame()
+        mean_os = float("nan")
+        if not mnd_rows.empty and "validation_score" in mnd_rows.columns:
+            mnd_rows["validation_score"] = pd.to_numeric(
+                mnd_rows["validation_score"], errors="coerce"
+            )
+            val_series = mnd_rows["validation_score"].dropna()
+            if not val_series.empty:
+                mean_os = float(val_series.mean())
+        return mnd_count, risk_mean, mean_os
+    current_mnd, current_risk, current_os = _aggregate(df_window)
+    actor_name = ""
+    if "actors" in df_window.columns:
+        counts: dict[str, int] = {}
+        for raw in df_window["actors"]:
+            if raw is None:
+                continue
+            if isinstance(raw, (list, tuple, set)):
+                items = raw
+            elif isinstance(raw, str):
+                splits = re.split(r"[;,]", raw)
+                items = [item for item in (part.strip() for part in splits) if item]
+            elif hasattr(raw, "__iter__"):
+                try:
+                    items = list(raw)
+                except TypeError:
+                    items = [raw]
+            else:
+                items = [raw]
+            for actor in items:
+                name = str(actor).strip()
+                if not name:
+                    continue
+                counts[name] = counts.get(name, 0) + 1
+        if counts:
+            actor_name = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    result["mnd_count"] = current_mnd
+    result["mean_risk"] = current_risk
+    result["mean_os_anom"] = current_os
+    result["top_actor"] = actor_name
+    if df_prev is not None and not df_prev.empty:
+        prev_mnd, prev_risk, prev_os = _aggregate(df_prev)
+        if not pd.isna(prev_mnd):
+            result["d_mnd"] = current_mnd - prev_mnd
+        if not pd.isna(prev_risk):
+            result["d_mean_risk"] = current_risk - prev_risk
+        if not pd.isna(prev_os):
+            result["d_mean_os_anom"] = current_os - prev_os
+    return result
+
+
+
 def load_artifacts(
     parquet_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
@@ -1386,6 +1473,66 @@ def main() -> None:
         ["Analyst", "Arcade", "History"]
     )
     with analyst_tab:
+        kpi_prev_df: pd.DataFrame | None = None
+        if not filtered_window.empty and "dt" in filtered_window.columns:
+            dt_series = pd.to_datetime(
+                filtered_window["dt"], utc=True, errors="coerce"
+            )
+            dt_series = dt_series.dropna()
+            if not dt_series.empty:
+                window_end = dt_series.max()
+                prev_start = window_end - timedelta(hours=24)
+                prev_end = window_end
+                baseline_df = _apply_filters(
+                    df,
+                    selected_sources,
+                    severity_min,
+                    severity_max,
+                    selected_categories,
+                )
+                if not baseline_df.empty and "dt" in baseline_df.columns:
+                    baseline_df = baseline_df.copy()
+                    baseline_df["dt"] = pd.to_datetime(
+                        baseline_df["dt"],
+                        utc=True,
+                        errors="coerce",
+                    )
+                    baseline_df = baseline_df.dropna(subset=["dt"])
+                    mask = (
+                        (baseline_df["dt"] >= prev_start)
+                        & (baseline_df["dt"] < prev_end)
+                    )
+                    kpi_prev_df = baseline_df[mask]
+        kpis = compute_kpis(filtered_window, kpi_prev_df)
+
+        def _format_value(value: float, decimals: int = 2) -> str:
+            if pd.isna(value):
+                return "--"
+            if decimals == 0:
+                return f"{value:.0f}"
+            return f"{value:.{decimals}f}"
+
+        def _format_delta(value: float, decimals: int = 2) -> str:
+            if pd.isna(value):
+                return "--"
+            if decimals == 0:
+                return f"{value:+.0f}"
+            return f"{value:+.{decimals}f}"
+
+        mnd_display = _format_value(kpis["mnd_count"], 0)
+        mnd_delta = _format_delta(kpis["d_mnd"], 0)
+        risk_display = _format_value(kpis["mean_risk"])
+        risk_delta = _format_delta(kpis["d_mean_risk"])
+        os_display = _format_value(kpis["mean_os_anom"])
+        os_delta = _format_delta(kpis["d_mean_os_anom"])
+        top_actor = str(kpis["top_actor"]).strip()
+        if not top_actor:
+            top_actor = "--"
+        kpi_cols = st.columns(4)
+        kpi_cols[0].metric("MND incidents", mnd_display, mnd_delta)
+        kpi_cols[1].metric("Mean risk", risk_display, risk_delta)
+        kpi_cols[2].metric("Mean OS_ANOM", os_display, os_delta)
+        kpi_cols[3].metric("Top actor", top_actor, "--")
         _window_header(display_df, hours)
         render_analyst_tab(
             filtered_window, display_df, hours, cutoff, only_mnd, map_layer,
