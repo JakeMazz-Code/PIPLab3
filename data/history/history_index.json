@@ -1,0 +1,32 @@
+{
+  "generated_at": "2025-09-19T05:24:55.250624+00:00",
+  "days": [
+    {
+      "date": "2025-09-16",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250916.parquet",
+      "incident_size": 13268,
+      "incident_mtime": "2025-09-19T05:24:28.880345+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250916.csv",
+      "risk_size": 574,
+      "risk_mtime": "2025-09-19T05:24:28.907380+00:00"
+    },
+    {
+      "date": "2025-09-17",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250917.parquet",
+      "incident_size": 13268,
+      "incident_mtime": "2025-09-19T05:24:41.714211+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250917.csv",
+      "risk_size": 574,
+      "risk_mtime": "2025-09-19T05:24:41.733698+00:00"
+    },
+    {
+      "date": "2025-09-18",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250918.parquet",
+      "incident_size": 13268,
+      "incident_mtime": "2025-09-19T05:24:55.219040+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250918.csv",
+      "risk_size": 574,
+      "risk_mtime": "2025-09-19T05:24:55.246296+00:00"
+    }
+  ]
+}
