@@ -160,11 +160,8 @@ def save_outputs(metrics: dict[str, float]) -> None:
 
     fig, ax = plt.subplots(figsize=(4, 3))
     ax.axis("off")
-    table = [[f"TP
-{int(tp)}", f"FP
-{int(fp)}"], [f"FN
-{int(fn)}", f"TN
-{int(tn)}"]]
+    table = [[f"TP\n{int(tp)}", f"FP\n{int(fp)}"],
+             [f"FN\n{int(fn)}", f"TN\n{int(tn)}"]]
     ax.table(cellText=table, loc="center")
     fig.tight_layout()
     fig.savefig(png_path, dpi=150)
