@@ -57,43 +57,129 @@ def _grid_to_centroid(grid_id: str) -> tuple[float, float] | None:
 
 
 def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for grid_id, group in df.groupby("grid_id"):
+    if df.empty or "grid_id" not in df.columns:
+        return pd.DataFrame()
+    working = df.copy()
+    working["risk_score"] = pd.to_numeric(
+        working.get("risk_score"), errors="coerce"
+    )
+    working["severity_0_5"] = pd.to_numeric(
+        working.get("severity_0_5"), errors="coerce"
+    )
+    if "corroborations" in working.columns:
+        working["os_anom_value"] = working["corroborations"].apply(
+            _extract_os_anom
+        )
+    else:
+        working["os_anom_value"] = 0.0
+    working = working.dropna(subset=["risk_score"])
+    rows: list[dict[str, Any]] = []
+    for grid_id, group in working.groupby("grid_id"):
         centroid = _grid_to_centroid(grid_id)
         if centroid is None:
             continue
-        lat, lon = centroid
-        mean_risk = pd.to_numeric(group["risk_score"], errors="coerce").mean()
-        rows.append({
-            "grid_id": grid_id,
-            "lat": lat,
-            "lon": lon,
-            "risk_score": mean_risk,
-        })
-    return pd.DataFrame(rows)
+        mean_risk = float(group["risk_score"].mean())
+        mean_os = float(
+            pd.to_numeric(group["os_anom_value"], errors="coerce")
+            .fillna(0.0)
+            .mean()
+        )
+        mean_severity = float(
+            pd.to_numeric(group.get("severity_0_5"), errors="coerce")
+            .fillna(0.0)
+            .mean()
+        )
+        last_seen = pd.to_datetime(group.get("dt"), utc=True, errors="coerce")
+        last_seen = last_seen.dropna()
+        last_text = (
+            last_seen.max().strftime("%Y-%m-%d %H:%MZ")
+            if not last_seen.empty
+            else ""
+        )
+        actors_text = _sample_actors(group.get("actors", []))
+        rows.append(
+            {
+                "grid_id": grid_id,
+                "lat": centroid[0],
+                "lon": centroid[1],
+                "mean_risk": round(mean_risk, 3),
+                "mean_os_anom": round(mean_os, 2),
+                "mean_severity": round(mean_severity, 2),
+                "last_seen": last_text,
+                "actors": actors_text,
+            }
+        )
+    map_df = pd.DataFrame(rows)
+    if map_df.empty:
+        return map_df
+    map_df["risk_tooltip"] = map_df["mean_risk"].map(lambda val: f"{val:.2f}")
+    map_df["os_tooltip"] = map_df["mean_os_anom"].map(lambda val: f"{val:.2f}")
+    map_df["point_radius"] = (
+        map_df["mean_severity"].clip(lower=0.0)
+        + map_df["mean_os_anom"].clip(lower=0.0)
+        + 1.0
+    ) * 6000.0
+    return map_df
 
 
 def _watch_cells(
-    df: pd.DataFrame, cutoff: float, only_mnd: bool) -> pd.DataFrame:
-    scope = df[df["risk_score"].notna()].copy()
-    if only_mnd:
-        scope = scope[scope["source"] == "MND"]
-    scope["risk_score"] = pd.to_numeric(scope["risk_score"], errors="coerce")
+    df: pd.DataFrame, cutoff: float, only_mnd: bool, top_k: int = 5
+) -> pd.DataFrame:
+    if df.empty:
+        return df.iloc[0:0]
+    scope = df.copy()
+    if only_mnd and "source" in scope.columns:
+        scope = scope[scope["source"].astype(str) == "MND"]
+    scope["risk_score"] = pd.to_numeric(scope.get("risk_score"), errors="coerce")
     scope = scope.dropna(subset=["risk_score"])
     if scope.empty:
-        return scope
+        return scope.iloc[0:0]
+    if "actors" not in scope.columns:
+        scope["actors"] = [[] for _ in range(len(scope))]
     grouped = scope.groupby("grid_id").agg(
         mean_risk=("risk_score", "mean"),
         count=("grid_id", "size"),
         last_seen=("dt", "max"),
         actors_sample=("actors", lambda x: _sample_actors(x)),
     )
-    grouped = grouped[grouped["mean_risk"] >= cutoff]
-    grouped = grouped.sort_values("mean_risk", ascending=False).head(10)
-    grouped["last_seen"] = grouped["last_seen"].dt.tz_convert("UTC")
-    grouped["last_seen"] = grouped["last_seen"].dt.strftime("%Y-%m-%d %H:%MZ")
-    grouped["mean_risk"] = grouped["mean_risk"].round(3)
-    return grouped.reset_index()
+    filtered = grouped[grouped["mean_risk"] >= cutoff]
+    if filtered.empty:
+        filtered = grouped.sort_values("mean_risk", ascending=False).head(top_k)
+    else:
+        filtered = filtered.sort_values("mean_risk", ascending=False).head(top_k)
+    if filtered.empty:
+        return grouped.iloc[0:0]
+    filtered["last_seen"] = filtered["last_seen"].dt.tz_convert("UTC")
+    filtered["last_seen"] = filtered["last_seen"].dt.strftime("%Y-%m-%d %H:%MZ")
+    filtered["mean_risk"] = filtered["mean_risk"].round(3)
+    return filtered.reset_index()
+
+
+def _window_header(df: pd.DataFrame, hours: int) -> None:
+    total = len(df)
+    if "source" in df.columns:
+        mnd_count = int(df["source"].astype(str).eq("MND").sum())
+    else:
+        mnd_count = 0
+    st.caption(f"Window: last {hours}h | rows: {total} (MND: {mnd_count})")
+
+
+
+def _suggest_cutoff(df: pd.DataFrame) -> float | None:
+    if df.empty or "risk_score" not in df.columns:
+        return None
+    series = pd.to_numeric(df["risk_score"], errors="coerce").dropna()
+    if series.empty:
+        return None
+    return float(series.quantile(0.75))
+
+
+
+def _friendly_summary(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if "json parse failure" in text.lower():
+        return "AI summary unavailable (fallback)"
+    return text
 
 
 def _sample_actors(values: Iterable[Any]) -> str:
@@ -313,33 +399,79 @@ def _load_history_manifest(path: Path) -> dict[str, Any]:
 
 
 
-def render_heatmap(view_df: pd.DataFrame) -> None:
+def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
     if view_df.empty:
         st.info("No incident data for the selected window.")
         return
-    heat_df = _prepare_heatmap(view_df)
-    if heat_df.empty:
+    map_df = _prepare_heatmap(view_df)
+    if map_df.empty:
         st.info("No grid centroids available for map display.")
         return
-    if pdk is not None:
-        layer = pdk.Layer(
-            "HeatmapLayer",
-            data=heat_df,
-            get_position="[lon, lat]",
-            get_weight="risk_score",
+    if pdk is None:
+        st.map(map_df.rename(columns={"lat": "latitude", "lon": "longitude"}))
+        return
+    layers = []
+    tooltip = {
+        "html": (
+            "<b>{grid_id}</b><br/>Risk: {risk_tooltip}<br/>"
+            "OS_ANOM: {os_tooltip}<br/>Last: {last_seen}<br/>Actors: {actors}"
+        ),
+        "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
+    }
+    if map_layer == "Heatmap":
+        layers.append(
+            pdk.Layer(
+                "HeatmapLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                get_weight="mean_risk",
+            )
         )
-        view_state = pdk.ViewState(latitude=23.5, longitude=121.0, zoom=5)
-        deck = pdk.Deck(layers=[layer], initial_view_state=view_state)
-        st.pydeck_chart(deck)
+    elif map_layer == "Hexagons":
+        layers.append(
+            pdk.Layer(
+                "HexagonLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                radius=25000,
+                elevation_scale=60,
+                elevation_range=[0, 300],
+                extruded=True,
+                coverage=1,
+                get_elevation_weight="mean_risk",
+            )
+        )
     else:
-        st.map(heat_df.rename(columns={"lat": "latitude", "lon": "longitude"}))
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                get_radius="point_radius",
+                get_fill_color="[255, 140, 0, 180]",
+                pickable=True,
+            )
+        )
+    view_state = pdk.ViewState(
+        latitude=float(map_df["lat"].mean()),
+        longitude=float(map_df["lon"].mean()),
+        zoom=5.2,
+        pitch=30,
+    )
+    deck = pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        tooltip=tooltip,
+        map_style="mapbox://styles/mapbox/dark-v10",
+    )
+    st.pydeck_chart(deck)
 
 
 def render_anomaly_chart(df: pd.DataFrame) -> None:
-    chart_df = df.copy()
-    if "validation_score" not in chart_df.columns or chart_df.empty:
+    if df.empty or "validation_score" not in df.columns:
         st.info("No validation scores available for chart.")
         return
+    chart_df = df.copy()
     chart_df["dt_hour"] = chart_df["dt"].dt.floor("H")
     grouped = (
         chart_df.groupby("dt_hour")["validation_score"].mean().reset_index()
@@ -375,15 +507,19 @@ def render_analyst_tab(
     hours: int,
     cutoff: float,
     only_mnd: bool,
+    map_layer: str,
     brief_text: str | None,
 ) -> None:
     st.subheader("Heatmap")
-    render_heatmap(window_df)
+    render_heatmap(window_df, map_layer)
 
     st.subheader("Watch cells")
     watch_source = _filter_window(df, hours)
-    watch_df = _watch_cells(watch_source, cutoff, only_mnd)
-    st.dataframe(watch_df)
+    watch_df = _watch_cells(watch_source, cutoff, only_mnd, top_k=5)
+    if watch_df.empty:
+        st.info("No data in window.")
+    else:
+        st.dataframe(watch_df)
 
     st.subheader("MND incidents")
     mnd_table = _filter_window(df[df["source"] == "MND"], hours)
@@ -398,13 +534,18 @@ def render_analyst_tab(
         "validation_score",
         "corroborations",
     ]
+    display_table = mnd_table.copy()
     for column in columns:
-        if column not in mnd_table.columns:
-            mnd_table[column] = ""
-    st.dataframe(mnd_table[columns])
+        if column not in display_table.columns:
+            display_table[column] = ""
+    if "summary_one_line" in display_table.columns:
+        display_table["summary_one_line"] = display_table["summary_one_line"].apply(
+            _friendly_summary
+        )
+    st.dataframe(display_table[columns])
 
-    st.subheader("OpenSky anomaly chart")
-    render_anomaly_chart(_filter_window(df[df["source"] != "MND"], hours))
+    st.subheader("MND anomaly chart")
+    render_anomaly_chart(mnd_table)
 
     st.subheader("LLM brief (24h)")
     render_brief(mnd_table, brief_text)
@@ -414,6 +555,7 @@ def render_arcade_tab(
     window_df: pd.DataFrame,
     cutoff: float,
     watchlist_path: Path,
+    map_layer: str,
 ) -> None:
     arcade_df = _prepare_arcade_metrics(window_df)
     if arcade_df.empty:
@@ -515,7 +657,7 @@ def render_arcade_tab(
     st.subheader("Visuals")
     vis_cols = st.columns([2, 1, 1])
     with vis_cols[0]:
-        render_heatmap(arcade_df)
+        render_heatmap(arcade_df, map_layer)
     with vis_cols[1]:
         risk_bins = pd.cut(
             arcade_df["risk_score"],
@@ -564,6 +706,7 @@ def render_history_tab(
     hours: int,
     cutoff: float,
     only_mnd: bool,
+    map_layer: str,
 ) -> None:
     entries = manifest.get("days", [])
     if not entries:
@@ -608,6 +751,8 @@ def render_history_tab(
         display_df = display_df[
             display_df["source"].astype(str) == "MND"
         ]
+    _window_header(display_df, hours)
+
     arcade_df = _prepare_arcade_metrics(display_df)
     if arcade_df.empty:
         total_points = 0
@@ -658,7 +803,9 @@ def render_history_tab(
         trend_df_plot = pd.DataFrame(trend_rows).set_index("date")
         st.subheader(f"Playback summary (last {lookback} days)")
         st.line_chart(trend_df_plot)
-    render_analyst_tab(history_df, display_df, hours, cutoff, only_mnd, None)
+    render_analyst_tab(
+        history_df, display_df, hours, cutoff, only_mnd, map_layer, None
+    )
     if len(playback_entries) > 1 and st.button(
         f"Play last {lookback} days",
         key="history_play_button",
@@ -701,12 +848,18 @@ def main() -> None:
     hours = sidebar.slider(
         "Time window (hours)", min_value=6, max_value=48, value=24
     )
+    window_df = _filter_window(df, hours)
     cutoff = sidebar.slider(
         "Risk cutoff", min_value=0.0, max_value=1.0, value=0.35, step=0.05
     )
+    suggestion = _suggest_cutoff(window_df)
+    if suggestion is not None:
+        sidebar.caption(f"Suggested cutoff: {suggestion:.2f}")
+    map_layer = sidebar.selectbox(
+        "Map layer", ("Heatmap", "Hexagons", "Points"), index=0
+    )
     only_mnd = sidebar.checkbox("Only MND cells")
 
-    window_df = _filter_window(df, hours)
     display_df = window_df
     if only_mnd:
         display_df = window_df[window_df["source"] == "MND"]
@@ -714,11 +867,15 @@ def main() -> None:
     manifest = _load_history_manifest(HISTORY_INDEX_PATH)
     analyst_tab, arcade_tab, history_tab = st.tabs(["Analyst", "Arcade", "History"])
     with analyst_tab:
-        render_analyst_tab(df, display_df, hours, cutoff, only_mnd, brief_text)
+        _window_header(display_df, hours)
+        render_analyst_tab(
+            df, display_df, hours, cutoff, only_mnd, map_layer, brief_text
+        )
     with arcade_tab:
-        render_arcade_tab(display_df, cutoff, WATCHLIST_PATH)
+        _window_header(display_df, hours)
+        render_arcade_tab(display_df, cutoff, WATCHLIST_PATH, map_layer)
     with history_tab:
-        render_history_tab(manifest, hours, cutoff, only_mnd)
+        render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
 
     sidebar.markdown("---")
     latest_parquet = _latest_parquet(ENRICHED_DIR)
