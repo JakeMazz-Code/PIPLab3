@@ -21,8 +21,14 @@ pip install -r requirements.txt
 Run the full ETL + enrichment pipeline (default 24 h window):
 
 ```bash
-python main.py --hours 24 --bbox 118,20,123,26 --out-prefix daily
+python main.py --hours 24 --out-prefix daily
 ```
+
+The pipeline uses fixed 0.5 degree bounding boxes:
+
+- CORE: 118,20,123,26
+- WIDE: 115,18,126,28 (default when --bbox is omitted)
+- MAX: 112,16,128,30 (one retry when AUTO_RETRY_MAX is enabled)
 
 This command will:
 
@@ -50,7 +56,17 @@ The simulation always writes `data/enriched/simulation_runs.csv`.
 
 - `DEEPSEEK_API_KEY` (required for enrichment).
 - `OPENSKY_USER`, `OPENSKY_PASS` (optional basic auth for OpenSky).
+- `AUTO_RETRY_MAX` (optional; set to true/1/y to retry once with the
+  MAX bbox when fewer than 50 OpenSky points are returned).
 - `GRAYZONE_LOG_LEVEL` (optional Python logging level, e.g. `DEBUG`).
+
+## Metrics line
+
+Each run prints a single `METRICS |` line with these fields in order:
+opensky_points, mnd_rows, merged_rows, enriched_rows, llm_success,
+llm_invalid_json, llm_retries, needs_review_count,
+validation_sparse_fallbacks, os_anom_rows, wall_ms.
+Example: `METRICS | opensky_points=90 mnd_rows=8 merged_rows=120 enriched_rows=24 llm_success=24 llm_invalid_json=0 llm_retries=1 needs_review_count=3 validation_sparse_fallbacks=2 os_anom_rows=5 wall_ms=2345`.
 
 ## Output overview
 
