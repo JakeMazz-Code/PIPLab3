@@ -32,6 +32,7 @@ GRID_STEP = 0.5
 OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
 
 
+@st.cache_data(ttl=60)
 def _latest_parquet(directory: Path) -> Path | None:
     try:
         candidates = list(directory.glob("*.parquet"))
@@ -43,6 +44,7 @@ def _latest_parquet(directory: Path) -> Path | None:
     return candidates[0]
 
 
+@st.cache_data(ttl=60)
 def _grid_to_centroid(grid_id: str) -> tuple[float, float] | None:
     if not isinstance(grid_id, str) or not grid_id.startswith("R"):
         return None
@@ -676,6 +678,7 @@ def _render_history_summary(summary: pd.DataFrame) -> None:
     plt.close(fig)
 
 
+@st.cache_data(ttl=60)
 def _load_history_manifest(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"days": []}
@@ -1139,6 +1142,19 @@ def _build_history_day_payload(
     }
 
 
+@st.cache_data(ttl=60)
+def _load_history_day_payload(
+    path_str: str,
+    mtime: float,
+    date_label: str,
+    hours: int,
+    only_mnd: bool,
+) -> dict[str, Any] | None:
+    history_df = _load_parquet_df(path_str, mtime)
+    if history_df.empty:
+        return None
+    return _build_history_day_payload(date_label, history_df, hours, only_mnd)
+
 
 def _prepare_history_day_entry(
     entry: dict[str, Any],
@@ -1147,16 +1163,20 @@ def _prepare_history_day_entry(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Load a manifest entry and build playback payload."""
     incident_path = Path(entry["incident_path"])
+    date_label = str(entry.get("date", incident_path.name))
     try:
         mtime = incident_path.stat().st_mtime
     except OSError as exc:
-        return None, f"Failed to access incidents for {entry['date']}: {exc}"
-    history_df = _load_parquet_df(str(incident_path), mtime)
-    if history_df.empty:
-        return None, f"Failed to load incidents for {entry['date']}."
-    payload = _build_history_day_payload(
-        entry["date"], history_df, hours, only_mnd
+        return None, f"Failed to access incidents for {date_label}: {exc}"
+    payload = _load_history_day_payload(
+        str(incident_path),
+        mtime,
+        date_label,
+        hours,
+        only_mnd,
     )
+    if payload is None:
+        return None, f"Failed to load incidents for {date_label}."
     return payload, None
 
 
@@ -1231,15 +1251,16 @@ def _prepare_snapshot_day(only_mnd: bool) -> dict[str, Any] | None:
         parquet_mtime = parquet_path.stat().st_mtime
     except OSError:
         return None
-    snapshot_df = _load_parquet_df(str(parquet_path), parquet_mtime)
-    if snapshot_df.empty:
-        return None
-    return _build_history_day_payload(
+    payload = _load_history_day_payload(
+        str(parquet_path),
+        parquet_mtime,
         "Latest 24h snapshot",
-        snapshot_df,
         24,
         only_mnd,
     )
+    if payload is None:
+        return None
+    return payload
 
 
 
@@ -1510,15 +1531,18 @@ def main() -> None:
         display_df = display_df[
             display_df["source"].astype(str) == "MND"
         ]
+    analyst_source_df = filtered_window
+    analyst_window_df = display_df
+    arcade_window_df = display_df
     manifest = _load_history_manifest(HISTORY_INDEX_PATH)
     analyst_tab, arcade_tab, history_tab = st.tabs(
         ["Analyst", "Arcade", "History"]
     )
     with analyst_tab:
         kpi_prev_df: pd.DataFrame | None = None
-        if not filtered_window.empty and "dt" in filtered_window.columns:
+        if not analyst_source_df.empty and "dt" in analyst_source_df.columns:
             dt_series = pd.to_datetime(
-                filtered_window["dt"], utc=True, errors="coerce"
+                analyst_source_df["dt"], utc=True, errors="coerce"
             )
             dt_series = dt_series.dropna()
             if not dt_series.empty:
@@ -1545,7 +1569,7 @@ def main() -> None:
                         & (baseline_df["dt"] < prev_end)
                     )
                     kpi_prev_df = baseline_df[mask]
-        kpis = compute_kpis(filtered_window, kpi_prev_df)
+        kpis = compute_kpis(analyst_source_df, kpi_prev_df)
 
         def _format_value(value: float, decimals: int = 2) -> str:
             if pd.isna(value):
@@ -1575,14 +1599,21 @@ def main() -> None:
         kpi_cols[1].metric("Mean risk", risk_display, risk_delta)
         kpi_cols[2].metric("Mean OS_ANOM", os_display, os_delta)
         kpi_cols[3].metric("Top actor", top_actor, "--")
-        _window_header(display_df, hours)
+        _window_header(analyst_window_df, hours)
         render_analyst_tab(
-            filtered_window, display_df, hours, cutoff, only_mnd, map_layer,
+            analyst_source_df,
+            analyst_window_df,
+            hours,
+            cutoff,
+            only_mnd,
+            map_layer,
             brief_text
         )
     with arcade_tab:
-        _window_header(display_df, hours)
-        render_arcade_tab(display_df, cutoff, WATCHLIST_PATH, map_layer)
+        _window_header(arcade_window_df, hours)
+        render_arcade_tab(
+            arcade_window_df, cutoff, WATCHLIST_PATH, map_layer
+        )
     with history_tab:
         render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
     sidebar.markdown("---")
