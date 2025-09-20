@@ -15,9 +15,9 @@ from typing import Any, Iterable
 import pandas as pd
 import streamlit as st
 
-try:  # pydeck is optional; fall back if missing
+try:
     import pydeck as pdk  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except Exception:
     pdk = None
 
 import matplotlib.pyplot as plt
@@ -32,6 +32,7 @@ GRID_STEP = 0.5
 OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
 
 
+@st.cache_data(ttl=60)
 def _latest_parquet(directory: Path) -> Path | None:
     try:
         candidates = list(directory.glob("*.parquet"))
@@ -43,6 +44,7 @@ def _latest_parquet(directory: Path) -> Path | None:
     return candidates[0]
 
 
+@st.cache_data(ttl=60)
 def _grid_to_centroid(grid_id: str) -> tuple[float, float] | None:
     if not isinstance(grid_id, str) or not grid_id.startswith("R"):
         return None
@@ -76,6 +78,10 @@ def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     else:
         working["os_anom_value"] = 0.0
     working = working.dropna(subset=["risk_score"])
+    if working.empty:
+        return pd.DataFrame()
+    if not working["risk_score"].ne(0).any():
+        working.loc[:, "risk_score"] = 0.05
     rows: list[dict[str, Any]] = []
     for grid_id, group in working.groupby("grid_id"):
         centroid = _grid_to_centroid(grid_id)
@@ -115,6 +121,19 @@ def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     map_df = pd.DataFrame(rows)
     if map_df.empty:
         return map_df
+    map_df["lat"] = pd.to_numeric(map_df["lat"], errors="coerce")
+    map_df["lon"] = pd.to_numeric(map_df["lon"], errors="coerce")
+    map_df = map_df.dropna(subset=["lat", "lon"])
+    if map_df.empty:
+        return map_df
+    map_df = map_df[
+        map_df["lat"].between(-90.0, 90.0)
+        & map_df["lon"].between(-180.0, 180.0)
+    ].copy()
+    if map_df.empty:
+        return map_df
+    map_df.loc[:, "lat"] = map_df["lat"].clip(-90.0, 90.0)
+    map_df.loc[:, "lon"] = map_df["lon"].clip(-180.0, 180.0)
     map_df["risk_tooltip"] = map_df["mean_risk"].map(lambda val: f"{val:.2f}")
     map_df["os_tooltip"] = map_df["mean_os_anom"].map(lambda val: f"{val:.2f}")
     map_df["point_radius"] = (
@@ -659,6 +678,7 @@ def _render_history_summary(summary: pd.DataFrame) -> None:
     plt.close(fig)
 
 
+@st.cache_data(ttl=60)
 def _load_history_manifest(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"days": []}
@@ -719,14 +739,22 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 "lat": centroid[0],
                 "lon": centroid[1],
             }
-    if pdk is None:
-        st.map(
-            map_df.rename(columns={"lat": "latitude", "lon": "longitude"})
+    def _render_fallback() -> None:
+        st.info("Map fell back to base map.")
+        fb = map_df.rename(
+            columns={"lat": "latitude", "lon": "longitude"}
         )
+        if {"latitude", "longitude"}.issubset(fb.columns):
+            st.map(fb[["latitude", "longitude"]])
+        else:
+            st.warning("No valid lat/lon to display.")
         if selected_coord is not None:
             st.caption(f"Focused grid: {selected_coord['grid_id']}")
         elif starred_coords:
             st.caption(f"Starred grids: {len(starred_coords)}")
+
+    if pdk is None:
+        _render_fallback()
         return
     layers = []
     tooltip = {
@@ -736,7 +764,8 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         ),
         "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
     }
-    if map_layer == "Heatmap":
+    small_sample = len(map_df) < 5
+    if map_layer == "Heatmap" and not small_sample:
         layers.append(
             pdk.Layer(
                 "HeatmapLayer",
@@ -745,7 +774,7 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 get_weight="mean_risk",
             )
         )
-    elif map_layer == "Hexagons":
+    elif map_layer == "Hexagons" and not small_sample:
         layers.append(
             pdk.Layer(
                 "HexagonLayer",
@@ -812,9 +841,13 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         layers=layers,
         initial_view_state=view_state,
         tooltip=tooltip,
-        map_style="mapbox://styles/mapbox/dark-v10",
+        map_provider="carto",
+        map_style="dark",
     )
-    st.pydeck_chart(deck)
+    try:
+        st.pydeck_chart(deck, use_container_width=True)
+    except Exception:
+        _render_fallback()
 
 
 def render_anomaly_chart(df: pd.DataFrame) -> None:
@@ -1109,6 +1142,19 @@ def _build_history_day_payload(
     }
 
 
+@st.cache_data(ttl=60)
+def _load_history_day_payload(
+    path_str: str,
+    mtime: float,
+    date_label: str,
+    hours: int,
+    only_mnd: bool,
+) -> dict[str, Any] | None:
+    history_df = _load_parquet_df(path_str, mtime)
+    if history_df.empty:
+        return None
+    return _build_history_day_payload(date_label, history_df, hours, only_mnd)
+
 
 def _prepare_history_day_entry(
     entry: dict[str, Any],
@@ -1117,16 +1163,20 @@ def _prepare_history_day_entry(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Load a manifest entry and build playback payload."""
     incident_path = Path(entry["incident_path"])
+    date_label = str(entry.get("date", incident_path.name))
     try:
         mtime = incident_path.stat().st_mtime
     except OSError as exc:
-        return None, f"Failed to access incidents for {entry['date']}: {exc}"
-    history_df = _load_parquet_df(str(incident_path), mtime)
-    if history_df.empty:
-        return None, f"Failed to load incidents for {entry['date']}."
-    payload = _build_history_day_payload(
-        entry["date"], history_df, hours, only_mnd
+        return None, f"Failed to access incidents for {date_label}: {exc}"
+    payload = _load_history_day_payload(
+        str(incident_path),
+        mtime,
+        date_label,
+        hours,
+        only_mnd,
     )
+    if payload is None:
+        return None, f"Failed to load incidents for {date_label}."
     return payload, None
 
 
@@ -1201,15 +1251,16 @@ def _prepare_snapshot_day(only_mnd: bool) -> dict[str, Any] | None:
         parquet_mtime = parquet_path.stat().st_mtime
     except OSError:
         return None
-    snapshot_df = _load_parquet_df(str(parquet_path), parquet_mtime)
-    if snapshot_df.empty:
-        return None
-    return _build_history_day_payload(
+    payload = _load_history_day_payload(
+        str(parquet_path),
+        parquet_mtime,
         "Latest 24h snapshot",
-        snapshot_df,
         24,
         only_mnd,
     )
+    if payload is None:
+        return None
+    return payload
 
 
 
@@ -1480,15 +1531,18 @@ def main() -> None:
         display_df = display_df[
             display_df["source"].astype(str) == "MND"
         ]
+    analyst_source_df = filtered_window
+    analyst_window_df = display_df
+    arcade_window_df = display_df
     manifest = _load_history_manifest(HISTORY_INDEX_PATH)
     analyst_tab, arcade_tab, history_tab = st.tabs(
         ["Analyst", "Arcade", "History"]
     )
     with analyst_tab:
         kpi_prev_df: pd.DataFrame | None = None
-        if not filtered_window.empty and "dt" in filtered_window.columns:
+        if not analyst_source_df.empty and "dt" in analyst_source_df.columns:
             dt_series = pd.to_datetime(
-                filtered_window["dt"], utc=True, errors="coerce"
+                analyst_source_df["dt"], utc=True, errors="coerce"
             )
             dt_series = dt_series.dropna()
             if not dt_series.empty:
@@ -1515,7 +1569,7 @@ def main() -> None:
                         & (baseline_df["dt"] < prev_end)
                     )
                     kpi_prev_df = baseline_df[mask]
-        kpis = compute_kpis(filtered_window, kpi_prev_df)
+        kpis = compute_kpis(analyst_source_df, kpi_prev_df)
 
         def _format_value(value: float, decimals: int = 2) -> str:
             if pd.isna(value):
@@ -1545,14 +1599,21 @@ def main() -> None:
         kpi_cols[1].metric("Mean risk", risk_display, risk_delta)
         kpi_cols[2].metric("Mean OS_ANOM", os_display, os_delta)
         kpi_cols[3].metric("Top actor", top_actor, "--")
-        _window_header(display_df, hours)
+        _window_header(analyst_window_df, hours)
         render_analyst_tab(
-            filtered_window, display_df, hours, cutoff, only_mnd, map_layer,
+            analyst_source_df,
+            analyst_window_df,
+            hours,
+            cutoff,
+            only_mnd,
+            map_layer,
             brief_text
         )
     with arcade_tab:
-        _window_header(display_df, hours)
-        render_arcade_tab(display_df, cutoff, WATCHLIST_PATH, map_layer)
+        _window_header(arcade_window_df, hours)
+        render_arcade_tab(
+            arcade_window_df, cutoff, WATCHLIST_PATH, map_layer
+        )
     with history_tab:
         render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
     sidebar.markdown("---")
