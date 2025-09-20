@@ -1221,11 +1221,11 @@ def render_history_tab(
     map_layer: str,
 ) -> None:
     entries = manifest.get("days", [])
-    if not entries:
-        st.info("No history data available.")
-        return
-
     available_days = len(entries)
+    available = max(available_days, 0)
+    if available == 0:
+        st.info("No history partitions yet.")
+        return
     date_options = [entry["date"] for entry in entries]
     selected_key = "history_selected_date"
     if (
@@ -1235,25 +1235,21 @@ def render_history_tab(
         st.session_state[selected_key] = date_options[-1]
 
     slider_key = "history_playback_days"
-    max_slider = min(30, available_days)
-    if max_slider >= 3:
-        default_window = min(7, max_slider)
-        st.session_state.setdefault(slider_key, default_window)
-        current = st.session_state[slider_key]
-        current = max(3, min(current, max_slider))
-        if current != st.session_state[slider_key]:
-            st.session_state[slider_key] = current
-        lookback = st.slider(
-            "Lookback (days)",
-            min_value=3,
-            max_value=max_slider,
-            value=st.session_state[slider_key],
-            key=slider_key,
-        )
-    else:
-        lookback = max_slider
-        st.caption("Lookback locked to available history.")
-        st.session_state[slider_key] = lookback
+    lookback_min = 1
+    lookback_max = min(30, max(available, 1))
+    default = min(max(7, lookback_min), lookback_max)
+    st.session_state.setdefault(slider_key, default)
+    current = st.session_state[slider_key]
+    current = max(lookback_min, min(current, lookback_max))
+    if current != st.session_state[slider_key]:
+        st.session_state[slider_key] = current
+    lookback = st.slider(
+        "Playback range (days)",
+        min_value=lookback_min,
+        max_value=lookback_max,
+        value=st.session_state[slider_key],
+        key=slider_key,
+    )
 
     snapshot_key = "history_show_snapshot"
     st.session_state.setdefault(snapshot_key, True)
