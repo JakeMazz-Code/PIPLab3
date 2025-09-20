@@ -76,6 +76,10 @@ def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     else:
         working["os_anom_value"] = 0.0
     working = working.dropna(subset=["risk_score"])
+    if working.empty:
+        return pd.DataFrame()
+    if not working["risk_score"].ne(0).any():
+        working.loc[:, "risk_score"] = 0.05
     rows: list[dict[str, Any]] = []
     for grid_id, group in working.groupby("grid_id"):
         centroid = _grid_to_centroid(grid_id)
@@ -115,6 +119,19 @@ def _prepare_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     map_df = pd.DataFrame(rows)
     if map_df.empty:
         return map_df
+    map_df["lat"] = pd.to_numeric(map_df["lat"], errors="coerce")
+    map_df["lon"] = pd.to_numeric(map_df["lon"], errors="coerce")
+    map_df = map_df.dropna(subset=["lat", "lon"])
+    if map_df.empty:
+        return map_df
+    map_df = map_df[
+        map_df["lat"].between(-90.0, 90.0)
+        & map_df["lon"].between(-180.0, 180.0)
+    ].copy()
+    if map_df.empty:
+        return map_df
+    map_df.loc[:, "lat"] = map_df["lat"].clip(-90.0, 90.0)
+    map_df.loc[:, "lon"] = map_df["lon"].clip(-180.0, 180.0)
     map_df["risk_tooltip"] = map_df["mean_risk"].map(lambda val: f"{val:.2f}")
     map_df["os_tooltip"] = map_df["mean_os_anom"].map(lambda val: f"{val:.2f}")
     map_df["point_radius"] = (
@@ -744,7 +761,8 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         ),
         "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
     }
-    if map_layer == "Heatmap":
+    small_sample = len(map_df) < 5
+    if map_layer == "Heatmap" and not small_sample:
         layers.append(
             pdk.Layer(
                 "HeatmapLayer",
@@ -753,7 +771,7 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 get_weight="mean_risk",
             )
         )
-    elif map_layer == "Hexagons":
+    elif map_layer == "Hexagons" and not small_sample:
         layers.append(
             pdk.Layer(
                 "HexagonLayer",
