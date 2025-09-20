@@ -15,9 +15,9 @@ from typing import Any, Iterable
 import pandas as pd
 import streamlit as st
 
-try:  # pydeck is optional; fall back if missing
+try:
     import pydeck as pdk  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except Exception:
     pdk = None
 
 import matplotlib.pyplot as plt
@@ -719,14 +719,22 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 "lat": centroid[0],
                 "lon": centroid[1],
             }
-    if pdk is None:
-        st.map(
-            map_df.rename(columns={"lat": "latitude", "lon": "longitude"})
+    def _render_fallback() -> None:
+        st.info("Map fell back to base map.")
+        fb = map_df.rename(
+            columns={"lat": "latitude", "lon": "longitude"}
         )
+        if {"latitude", "longitude"}.issubset(fb.columns):
+            st.map(fb[["latitude", "longitude"]])
+        else:
+            st.warning("No valid lat/lon to display.")
         if selected_coord is not None:
             st.caption(f"Focused grid: {selected_coord['grid_id']}")
         elif starred_coords:
             st.caption(f"Starred grids: {len(starred_coords)}")
+
+    if pdk is None:
+        _render_fallback()
         return
     layers = []
     tooltip = {
@@ -812,9 +820,13 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         layers=layers,
         initial_view_state=view_state,
         tooltip=tooltip,
-        map_style="mapbox://styles/mapbox/dark-v10",
+        map_provider="carto",
+        map_style="dark",
     )
-    st.pydeck_chart(deck)
+    try:
+        st.pydeck_chart(deck, use_container_width=True)
+    except Exception:
+        _render_fallback()
 
 
 def render_anomaly_chart(df: pd.DataFrame) -> None:
