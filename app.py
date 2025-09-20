@@ -30,6 +30,7 @@ WATCHLIST_PATH = EXAMPLES_DIR / "watchlist.json"
 HISTORY_INDEX_PATH = Path("data/history/history_index.json")
 GRID_STEP = 0.5
 OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
+MAX_TABLE_ROWS = 1000
 
 
 @st.cache_data(ttl=60)
@@ -952,7 +953,16 @@ def render_analyst_tab(
         ].apply(
             _friendly_summary
         )
-    st.dataframe(display_table[columns])
+    table_to_show = display_table
+    truncated = False
+    if len(display_table) > MAX_TABLE_ROWS:
+        table_to_show = display_table.iloc[:MAX_TABLE_ROWS]
+        truncated = True
+    st.dataframe(table_to_show[columns])
+    if truncated:
+        st.caption(
+            "Table truncated for display (showing first 1000 rows)."
+        )
     st.subheader("MND anomaly chart")
     render_anomaly_chart(mnd_table)
     st.subheader("LLM brief (24h)")
