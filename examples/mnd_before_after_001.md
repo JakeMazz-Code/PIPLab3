@@ -1,6 +1,6 @@
 # MND Bulletin Enrichment
 
-**Raw snippet**: 中共解放軍臺海周邊海、空域動態 (點閱次數：540次)
+**Raw snippet**: 中共解放軍臺海周邊海、空域動態 (點閱次數：650次)
 
 **Enriched JSON**:
 

@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,7 +36,7 @@ MAX_TABLE_ROWS = 1000
 MAP_LAT = 23.5
 MAP_LON = 121.0
 MAP_ZOOM = 5.0
-MAP_HEIGHT = 560
+MAP_HEIGHT = 520
 
 if pdk is not None:
     _DEFAULT_VIEW = pdk.ViewState(
@@ -524,34 +525,121 @@ def summarize_counts(df: pd.DataFrame) -> tuple[int, int, int]:
     return int(os_mask.sum()), int(mnd_mask.sum()), int(df.shape[0])
 
 
-def _window_bounds(df: pd.DataFrame, hours: int) -> tuple[str, str, str]:
-    start_dt: datetime | None = None
-    end_dt: datetime | None = None
-    if not df.empty and "dt" in df.columns:
-        dt_series = pd.to_datetime(df["dt"], utc=True, errors="coerce")
-        dt_series = dt_series.dropna()
-        if not dt_series.empty:
-            start_dt = dt_series.min().to_pydatetime()
-            end_dt = dt_series.max().to_pydatetime()
-    if start_dt is None or end_dt is None:
-        end_dt = datetime.now(timezone.utc)
-        start_dt = end_dt - timedelta(hours=hours)
-    start_dt = start_dt.astimezone(timezone.utc)
-    end_dt = end_dt.astimezone(timezone.utc)
-    start_floor = start_dt.replace(minute=0, second=0, microsecond=0)
-    end_floor = end_dt.replace(minute=0, second=0, microsecond=0)
-    span_parts = [f"last {hours} h"]
-    if hours >= 24:
-        days_value = hours / 24
+
+def _format_utc(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+
+
+
+def _window_stats(
+    df: pd.DataFrame, start: datetime, end: datetime
+) -> tuple[datetime, datetime, float, float]:
+    requested = max((end - start).total_seconds() / 3600, 0.0)
+    if df.empty or "dt" not in df.columns:
+        return start, end, requested, 0.0
+    series = pd.to_datetime(df["dt"], utc=True, errors="coerce").dropna()
+    if series.empty:
+        return start, end, requested, 0.0
+    actual_start = series.min().to_pydatetime().astimezone(timezone.utc)
+    actual_end = series.max().to_pydatetime().astimezone(timezone.utc)
+    if actual_start < start:
+        actual_start = start
+    if actual_end > end:
+        actual_end = end
+    if actual_end < actual_start:
+        actual_end = actual_start
+    actual = max((actual_end - actual_start).total_seconds() / 3600, 0.0)
+    return actual_start, actual_end, requested, actual
+
+
+
+def _filter_time_range(
+    df: pd.DataFrame, start: datetime, end: datetime
+) -> pd.DataFrame:
+    if df.empty or "dt" not in df.columns:
+        return df.iloc[0:0].copy()
+    working = df.copy()
+    working["dt"] = pd.to_datetime(working["dt"], utc=True, errors="coerce")
+    working = working.dropna(subset=["dt"])
+    mask = (working["dt"] >= start) & (working["dt"] < end)
+    return working.loc[mask].copy()
+
+
+
+def _filter_risk_range(
+    df: pd.DataFrame, start: datetime, end: datetime
+) -> pd.DataFrame:
+    if df.empty:
+        return df.iloc[0:0].copy()
+    working = df.copy()
+    dt_column = None
+    for candidate in ("dt", "day", "date", "timestamp"):
+        if candidate in working.columns:
+            dt_series = pd.to_datetime(
+                working[candidate], utc=True, errors="coerce"
+            )
+            if dt_series.notna().any():
+                working["_window_dt"] = dt_series
+                dt_column = candidate
+                break
+    if dt_column is None:
+        return working
+    mask = (working["_window_dt"] >= start) & (working["_window_dt"] < end)
+    filtered = working.loc[mask].copy()
+    return filtered.drop(columns=["_window_dt"])
+
+
+
+def _dataset_bounds(
+    df: pd.DataFrame,
+) -> tuple[datetime | None, datetime | None]:
+    if df.empty or "dt" not in df.columns:
+        return None, None
+    series = pd.to_datetime(df["dt"], utc=True, errors="coerce").dropna()
+    if series.empty:
+        return None, None
+    return (
+        series.min().to_pydatetime().astimezone(timezone.utc),
+        series.max().to_pydatetime().astimezone(timezone.utc),
+    )
+
+
+
+def _window_bounds(
+    now_utc: datetime,
+    mode: str,
+    days: int,
+    default_hours: int,
+    data_min: datetime | None = None,
+) -> tuple[datetime, datetime, str]:
+    mode_key = mode.lower()
+    if mode_key == "24h":
+        hours = 24
+        label = "last 24 h"
+    elif mode_key == "48h":
+        hours = 48
+        label = "last 48 h"
+    elif mode_key == "ndays":
+        days = max(1, days)
+        hours = days * 24
+        label = f"last {days} d"
+    else:
+        hours = max(1, default_hours)
         if hours % 24 == 0:
-            days_label = f"last {int(days_value)} d"
+            label = f"last {hours // 24} d"
         else:
-            days_label = f"last {days_value:.1f} d"
-        span_parts.append(days_label)
-    span_text = " / ".join(span_parts)
-    start_text = start_floor.strftime("%Y-%m-%d %H:%MZ")
-    end_text = end_floor.strftime("%Y-%m-%d %H:%MZ")
-    return start_text, end_text, span_text
+            label = f"last {hours} h"
+    end = now_utc.astimezone(timezone.utc)
+    start = end - timedelta(hours=hours)
+    if data_min is not None:
+        data_min_utc = data_min.astimezone(timezone.utc)
+        if data_min_utc > start:
+            start = data_min_utc
+    if end < start:
+        end = start
+    return start, end, label
+
+
 
 def _filter_by_grid(df: pd.DataFrame, grid_id: str | None) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -564,6 +652,29 @@ def _filter_by_grid(df: pd.DataFrame, grid_id: str | None) -> pd.DataFrame:
     return df.loc[series.eq(grid_id)].copy()
 
 
+def _decode_log_bytes(payload: bytes) -> str | None:
+    if payload is None:
+        return None
+    if not payload:
+        return ""
+    bom_map = {
+        b"\xff\xfe": "utf-16",
+        b"\xfe\xff": "utf-16",
+        b"\xef\xbb\xbf": "utf-8-sig",
+    }
+    for marker, encoding in bom_map.items():
+        if payload.startswith(marker):
+            try:
+                return payload.decode(encoding)
+            except UnicodeDecodeError:
+                return None
+    encodings = ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "cp1252"]
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return None
 def _latest_metrics_line() -> str | None:
     logs_dir = Path("logs")
     if not logs_dir.exists():
@@ -578,29 +689,16 @@ def _latest_metrics_line() -> str | None:
         return None
     for log_path in candidates:
         try:
-            lines = log_path.read_text(encoding="utf-8").splitlines()
+            payload = log_path.read_bytes()
         except OSError:
             continue
-        for line in reversed(lines):
+        text = _decode_log_bytes(payload)
+        if not text:
+            continue
+        for line in reversed(text.splitlines()):
             if line.startswith("METRICS |"):
                 return line.strip()
     return None
-
-
-def _render_window_header(
-    df: pd.DataFrame, hours: int, risk_available: bool | None = None
-) -> None:
-    """Render the UTC window bounds and counts for the current view."""
-
-    os_count, mnd_count, total = summarize_counts(df)
-    start_text, end_text, span_text = _window_bounds(df, hours)
-    summary = (
-        f"Window: {start_text} -> {end_text} ({span_text})"
-        f" | rows: {total} (OS: {os_count} / MND: {mnd_count})"
-    )
-    if risk_available is not None:
-        summary += f" | Risk weights: {'yes' if risk_available else 'no'}"
-    st.caption(summary)
 
 
 def _suggest_cutoff(df: pd.DataFrame) -> float | None:
@@ -660,25 +758,6 @@ def _row_actors_text(value: Any) -> str:
     return str(value).strip()
 
 
-
-def _filter_window(df: pd.DataFrame, hours: int) -> pd.DataFrame:
-    if df.empty or "dt" not in df.columns:
-        return df
-    working = df.copy()
-    working["dt"] = pd.to_datetime(working["dt"], utc=True, errors="coerce")
-    working = working.dropna(subset=["dt"])
-    if working.empty:
-        return working
-    window_end = datetime.now(timezone.utc)
-    window_start = window_end - timedelta(hours=hours)
-    mask = (working["dt"] >= window_start) & (working["dt"] <= window_end)
-    filtered = working.loc[mask]
-    if filtered.empty:
-        latest = working["dt"].max()
-        if pd.notna(latest):
-            fallback_start = latest - timedelta(hours=hours)
-            filtered = working[working["dt"] >= fallback_start]
-    return filtered
 
 
 def _apply_filters(
@@ -1309,189 +1388,263 @@ def _wkey(ns: str, name: str) -> str:
 
 
 
-def _build_fallback_points(
-    df_os: pd.DataFrame,
-    df_mnd: pd.DataFrame,
-    risk_df: pd.DataFrame,
+def _prepare_point_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.iloc[0:0].copy()
+    working = df.copy()
+    working["lat"] = pd.to_numeric(working.get("lat"), errors="coerce")
+    working["lon"] = pd.to_numeric(working.get("lon"), errors="coerce")
+    needs_coords = working["lat"].isna() | working["lon"].isna()
+    if needs_coords.any():
+        coords = working.loc[needs_coords, "grid_id"].apply(_grid_to_centroid)
+        working.loc[needs_coords, "lat"] = coords.apply(
+            lambda value: value[0] if value else float("nan")
+        )
+        working.loc[needs_coords, "lon"] = coords.apply(
+            lambda value: value[1] if value else float("nan")
+        )
+    working = working.dropna(subset=["lat", "lon"])
+    return working
+
+
+
+def _prepare_os_points(df_os: pd.DataFrame) -> pd.DataFrame:
+    points = _prepare_point_dataframe(df_os)
+    if points.empty:
+        return points
+    points["dt_label"] = _format_dt_labels(points.get("dt"))
+    tooltip = "OS<br/>dt: " + points["dt_label"].fillna("")
+    callsign = points.get("callsign")
+    if callsign is not None:
+        call_series = callsign.fillna("").astype(str).str.strip()
+        mask = call_series.ne("")
+        tooltip = tooltip.where(~mask, tooltip + "<br/>" + call_series)
+    raw_text = points.get("raw_text")
+    if raw_text is not None:
+        raw_series = raw_text.fillna("").astype(str).str.strip()
+        mask = raw_series.ne("")
+        tooltip = tooltip.where(~mask, tooltip + "<br/>" + raw_series)
+    points["tooltip"] = tooltip
+    return points
+
+
+
+def _prepare_mnd_points(df_mnd: pd.DataFrame) -> pd.DataFrame:
+    points = _prepare_point_dataframe(df_mnd)
+    if points.empty:
+        return points
+    points["dt_label"] = _format_dt_labels(points.get("dt"))
+    tooltip = "MND<br/>dt: " + points["dt_label"].fillna("")
+    summary = points.get("summary_one_line")
+    raw_text = points.get("raw_text")
+    actors = points.get("actors")
+    for extra in (summary, raw_text):
+        if extra is None:
+            continue
+        series = extra.fillna("").astype(str).str.strip()
+        mask = series.ne("")
+        tooltip = tooltip.where(~mask, tooltip + "<br/>" + series)
+    if actors is not None:
+        actor_series = actors.apply(_row_actors_text).fillna("").astype(str)
+        mask = actor_series.ne("")
+        tooltip = tooltip.where(~mask, tooltip + "<br/>" + actor_series)
+    points["tooltip"] = tooltip
+    return points
+
+
+
+def _prepare_risk_layer(risk_df: pd.DataFrame) -> pd.DataFrame:
+    if risk_df.empty:
+        return risk_df.iloc[0:0].copy()
+    working = risk_df.copy()
+    working["risk_score"] = pd.to_numeric(
+        working.get("risk_score"), errors="coerce"
+    )
+    working = working.dropna(subset=["risk_score"])
+    for column in ("lat", "lon"):
+        working[column] = pd.to_numeric(working.get(column), errors="coerce")
+    needs_coords = working["lat"].isna() | working["lon"].isna()
+    if needs_coords.any():
+        coords = working.loc[needs_coords, "grid_id"].apply(_grid_to_centroid)
+        working.loc[needs_coords, "lat"] = coords.apply(
+            lambda value: value[0] if value else float("nan")
+        )
+        working.loc[needs_coords, "lon"] = coords.apply(
+            lambda value: value[1] if value else float("nan")
+        )
+    working = working.dropna(subset=["lat", "lon"])
+    working["weight"] = working["risk_score"].clip(lower=0.0, upper=1.0)
+    return working
+
+
+
+def _hex_source(
+    os_points: pd.DataFrame, mnd_points: pd.DataFrame
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
-    for label, frame in (("OS", df_os), ("MND", df_mnd), ("RISK", risk_df)):
+    for frame in (os_points, mnd_points):
         if frame is None or frame.empty:
             continue
-        subset = frame[["lat", "lon"]].copy()
-        subset = subset.dropna(subset=["lat", "lon"])
-        if subset.empty:
-            continue
-        subset["layer"] = label
-        frames.append(subset)
+        frames.append(frame[["lat", "lon"]])
     if not frames:
-        return pd.DataFrame(columns=["lat", "lon", "layer"])
+        return pd.DataFrame(columns=["lat", "lon"])
     return pd.concat(frames, ignore_index=True)
 
 
+
+@dataclass
+class MapRenderResult:
+    weights_present: bool
+    effective_mode: str
+    risk_cells: int
+    fallback_reason: str | None
+
+
+
 def _build_map_layers(
+    layer_mode: str,
     df_os: pd.DataFrame,
     df_mnd: pd.DataFrame,
     risk_df: pd.DataFrame,
-    show_hex: bool,
     show_os: bool,
     show_mnd: bool,
+    use_hexagons: bool,
     starred: Iterable[str] | None,
     selected_grid: str | None,
-) -> tuple[list[Any], pd.DataFrame, bool]:
+) -> tuple[list[Any], str, bool, int, str | None]:
     layers: list[Any] = []
-    risk_layer = pd.DataFrame()
-    weights_present = False
-    if not risk_df.empty:
-        risk_layer = risk_df.copy()
-        risk_layer["weight"] = pd.to_numeric(
-            risk_layer.get("risk_score"), errors="coerce"
-        )
-        risk_layer = risk_layer.dropna(subset=["lat", "lon", "weight"])
-        if not risk_layer.empty and risk_layer["weight"].nunique() > 1:
-            weights_present = True
-    if not weights_present and not df_mnd.empty:
-        fallback = df_mnd.copy()
-        fallback["lat"] = pd.to_numeric(fallback.get("lat"), errors="coerce")
-        fallback["lon"] = pd.to_numeric(fallback.get("lon"), errors="coerce")
-        needs_coords = fallback["lat"].isna() | fallback["lon"].isna()
-        if needs_coords.any():
-            coords = fallback.loc[needs_coords, "grid_id"].apply(
-                _grid_to_centroid
-            )
-            fallback.loc[needs_coords, "lat"] = coords.apply(
-                lambda value: value[0] if value else float("nan")
-            )
-            fallback.loc[needs_coords, "lon"] = coords.apply(
-                lambda value: value[1] if value else float("nan")
-            )
-        fallback = fallback.dropna(subset=["lat", "lon"])
-        if not fallback.empty:
-            severity = pd.to_numeric(
-                fallback.get("severity_0_5"), errors="coerce"
-            ).fillna(0.0)
-            os_series = fallback.get("corroborations")
-            if os_series is not None:
-                os_bonus = os_series.apply(_extract_os_anom).apply(
-                    lambda value: 0.2 if value > 0 else 0.0
-                )
-            else:
-                os_bonus = pd.Series(0.0, index=fallback.index)
-            fallback["weight"] = severity + os_bonus
-            grouped = fallback.groupby("grid_id").agg(
-                weight=("weight", "mean"),
-                lat=("lat", "mean"),
-                lon=("lon", "mean"),
-            )
-            grouped = grouped.reset_index().dropna(subset=["lat", "lon"])
-            if not grouped.empty and grouped["weight"].nunique() > 1:
-                risk_layer = grouped
-                weights_present = True
-    fallback_points = _build_fallback_points(df_os, df_mnd, risk_layer)
-    if pdk is None:
-        return [], fallback_points, weights_present
-    if weights_present:
-        data_source = risk_layer.copy()
-        if show_hex:
-            layers.append(
-                pdk.Layer(
-                    "HexagonLayer",
-                    data=data_source,
-                    get_position="[lon, lat]",
-                    get_weight="weight",
-                    radius=20000,
-                    elevation_scale=400,
-                    extruded=True,
-                    elevation_range=[0, 3000],
-                )
-            )
-        else:
+    os_points = _prepare_os_points(df_os)
+    mnd_points = _prepare_mnd_points(df_mnd)
+    risk_layer = _prepare_risk_layer(risk_df)
+    risk_cells = int(risk_layer.shape[0]) if not risk_layer.empty else 0
+    weights_present = not risk_layer.empty
+    effective_mode = layer_mode
+    fallback_reason: str | None = None
+
+    if layer_mode == "Heatmap":
+        if weights_present:
             layers.append(
                 pdk.Layer(
                     "HeatmapLayer",
-                    data=data_source,
+                    data=risk_layer,
                     get_position="[lon, lat]",
                     get_weight="weight",
-                    radius_pixels=60,
+                    radius_pixels=48,
                 )
             )
-    if show_os and not df_os.empty:
-        os_data = df_os.copy()
-        os_data["dt_label"] = _format_dt_labels(os_data.get("dt"))
-        tooltip = "OS<br/>dt: " + os_data["dt_label"].fillna("")
-        callsign = os_data.get("callsign")
-        if callsign is not None:
-            callsign = callsign.fillna("").astype(str).str.strip()
-            mask = callsign.ne("")
-            tooltip = tooltip.where(~mask, tooltip + "<br/>" + callsign)
-        raw_text = os_data.get("raw_text")
-        if raw_text is not None:
-            raw_series = raw_text.fillna("").astype(str).str.strip()
-            mask = raw_series.ne("")
-            tooltip = tooltip.where(~mask, tooltip + "<br/>" + raw_series)
-        os_data["tooltip"] = tooltip
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=os_data,
-                get_position="[lon, lat]",
-                get_radius="radius",
-                get_fill_color="[30, 144, 255, 140]",
-                pickable=True,
-                auto_highlight=True,
+        else:
+            effective_mode = "Points"
+            fallback_reason = (
+                "Risk weights unavailable; falling back to points."
             )
-        )
-    if show_mnd and not df_mnd.empty:
-        mnd_data = df_mnd.copy()
-        mnd_data["dt_label"] = _format_dt_labels(mnd_data.get("dt"))
-        summary = mnd_data.get("summary_one_line")
-        actors = mnd_data.get("actors")
-        raw_text = mnd_data.get("raw_text")
-        tooltip = "MND<br/>dt: " + mnd_data["dt_label"].fillna("")
-        for extra in (summary, raw_text):
-            if extra is None:
-                continue
-            series = extra.fillna("").astype(str).str.strip()
-            mask = series.ne("")
-            tooltip = tooltip.where(~mask, tooltip + "<br/>" + series)
-        if actors is not None:
-            actor_series = actors.apply(_row_actors_text).fillna("")
-            actor_series = actor_series.astype(str).str.strip()
-            mask = actor_series.ne("")
-            tooltip = tooltip.where(~mask, tooltip + "<br/>" + actor_series)
-        mnd_data["tooltip"] = tooltip
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=mnd_data,
-                get_position="[lon, lat]",
-                get_radius="radius",
-                get_fill_color="[255, 140, 0, 220]",
-                pickable=True,
-                auto_highlight=True,
+    elif layer_mode == "Hexagons":
+        if use_hexagons:
+            hex_points = _hex_source(os_points, mnd_points)
+            if not hex_points.empty:
+                layers.append(
+                    pdk.Layer(
+                        "HexagonLayer",
+                        data=hex_points,
+                        get_position="[lon, lat]",
+                        radius=20000,
+                        elevation_scale=40,
+                        elevation_range=[0, 2000],
+                        extruded=True,
+                        coverage=1.0,
+                        pickable=True,
+                    )
+                )
+            else:
+                effective_mode = "Points"
+                fallback_reason = (
+                    "No coordinates for hexagon layer; showing points."
+                )
+        else:
+            effective_mode = "Points"
+            fallback_reason = "Hexagon layer disabled; showing points."
+
+    if effective_mode == "Points":
+        if show_os and not os_points.empty:
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=os_points,
+                    get_position="[lon, lat]",
+                    get_radius=90,
+                    radius_min_pixels=3,
+                    radius_max_pixels=8,
+                    get_fill_color=[255, 120, 60, 180],
+                    get_line_color=[120, 60, 20, 200],
+                    line_width_min_pixels=1,
+                    pickable=True,
+                    auto_highlight=True,
+                )
             )
-        )
+        if show_mnd and not mnd_points.empty:
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=mnd_points,
+                    get_position="[lon, lat]",
+                    get_radius=120,
+                    radius_min_pixels=4,
+                    radius_max_pixels=10,
+                    get_fill_color=[220, 200, 80, 220],
+                    get_line_color=[150, 120, 40, 200],
+                    line_width_min_pixels=1,
+                    pickable=True,
+                    auto_highlight=True,
+                )
+            )
+    else:
+        if show_os and not os_points.empty:
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=os_points,
+                    get_position="[lon, lat]",
+                    get_radius=80,
+                    radius_min_pixels=2,
+                    radius_max_pixels=6,
+                    get_fill_color=[255, 120, 60, 150],
+                    pickable=True,
+                )
+            )
+        if show_mnd and not mnd_points.empty:
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=mnd_points,
+                    get_position="[lon, lat]",
+                    get_radius=110,
+                    radius_min_pixels=3,
+                    radius_max_pixels=8,
+                    get_fill_color=[220, 200, 80, 190],
+                    pickable=True,
+                )
+            )
+
     star_ids = list(starred or [])
     if star_ids:
-        star_coords: list[dict[str, float | str]] = []
+        star_rows: list[dict[str, float | str]] = []
         for grid_id in star_ids:
             centroid = _grid_to_centroid(grid_id)
             if centroid is None:
                 continue
-            star_coords.append(
+            star_rows.append(
                 {"grid_id": grid_id, "lat": centroid[0], "lon": centroid[1]}
             )
-        if star_coords:
+        if star_rows:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=pd.DataFrame(star_coords),
+                    data=pd.DataFrame(star_rows),
                     get_position="[lon, lat]",
                     get_radius=1,
-                    radius_scale=9000,
-                    radius_min_pixels=8,
+                    radius_scale=6000,
+                    radius_min_pixels=7,
                     filled=False,
-                    get_line_color=[255, 255, 255, 255],
+                    get_line_color=[255, 255, 255, 230],
                     line_width_min_pixels=2,
                     pickable=False,
                 )
@@ -1514,74 +1667,72 @@ def _build_map_layers(
                     data=focus_df,
                     get_position="[lon, lat]",
                     get_radius=1,
-                    radius_scale=14000,
-                    radius_min_pixels=12,
+                    radius_scale=9000,
+                    radius_min_pixels=9,
                     filled=False,
                     get_line_color=[255, 215, 0, 240],
                     line_width_min_pixels=3,
                     pickable=False,
                 )
             )
-    return layers, fallback_points, weights_present
+    return layers, effective_mode, weights_present, risk_cells, fallback_reason
+
 
 
 def _render_incident_map(
     df_os: pd.DataFrame,
     df_mnd: pd.DataFrame,
     risk_df: pd.DataFrame,
-    show_hex: bool,
+    layer_mode: str,
     show_os: bool,
     show_mnd: bool,
     starred: Iterable[str] | None,
     selected_grid: str | None,
     widget_ns: str,
-) -> bool:
-    layers, fallback_points, weights_present = _build_map_layers(
+    use_hexagons: bool,
+) -> MapRenderResult:
+    if pdk is None:
+        st.info("pydeck unavailable; map rendering skipped.")
+        return MapRenderResult(False, "Unavailable", 0, "pydeck unavailable")
+    (
+        layers,
+        effective_mode,
+        weights_present,
+        risk_cells,
+        message,
+    ) = _build_map_layers(
+        layer_mode,
         df_os,
         df_mnd,
         risk_df,
-        show_hex,
         show_os,
         show_mnd,
+        use_hexagons,
         starred,
         selected_grid,
     )
-    _ = widget_ns  # preserve signature for widget scoping
+    if not layers:
+        st.info("No geolocated data for this window.")
+        return MapRenderResult(weights_present, effective_mode, risk_cells, message)
+    tooltip = {
+        "html": "{tooltip}",
+        "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
+    }
+    deck = pdk.Deck(
+        layers=layers,
+        initial_view_state=_DEFAULT_VIEW,
+        map_provider="carto",
+        map_style="dark",
+        tooltip=tooltip,
+    )
+    st.pydeck_chart(
+        deck,
+        use_container_width=True,
+        height=MAP_HEIGHT,
+        key=f"{widget_ns}_deck",
+    )
+    return MapRenderResult(weights_present, effective_mode, risk_cells, message)
 
-    def _render_points(points: pd.DataFrame, empty_message: str) -> None:
-        fallback = points.dropna(subset=["lat", "lon"]).copy()
-        if fallback.empty:
-            st.info(empty_message)
-            return
-        rename = fallback.rename(
-            columns={"lat": "latitude", "lon": "longitude"}
-        )
-        st.map(rename[["latitude", "longitude"]])
-
-    if pdk is None or not layers:
-        if fallback_points.empty:
-            fallback_points = _build_fallback_points(df_os, df_mnd, risk_df)
-        _render_points(
-            fallback_points,
-            "No location data available for this window.",
-        )
-        return weights_present
-    try:
-        deck = pdk.Deck(
-            layers=layers,
-            initial_view_state=_DEFAULT_VIEW,
-            map_provider="carto",
-            map_style="dark",
-        )
-        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
-    except Exception:
-        if fallback_points.empty:
-            fallback_points = _build_fallback_points(df_os, df_mnd, risk_df)
-        _render_points(
-            fallback_points,
-            "Map rendering failed; showing point fallback.",
-        )
-    return weights_present
 
 
 def render_anomaly_chart(df: pd.DataFrame) -> None:
@@ -1633,10 +1784,11 @@ def render_monitor_tab(
     )
     history_max = min(14, len(history_days)) if history_days else 0
     selected_days = 1
-    window_hours = 24
-    risk_window = pd.DataFrame()
+    mode_key = "24h"
+    default_hours = 24
     source_label = "snapshot"
-
+    working_df = snapshot_df
+    risk_working: pd.DataFrame | None = snapshot_risk_df
     if window_mode == "Last N days":
         if history_max == 0:
             st.info("History data unavailable. Run backfill.")
@@ -1648,46 +1800,73 @@ def render_monitor_tab(
             value=min(7, history_max),
             key=_wkey("mon", "days"),
         )
-        window_df = _load_history_enriched(selected_days)
-        risk_window = _load_history_risk(selected_days)
+        mode_key = "ndays"
+        default_hours = selected_days * 24
+        working_df = _load_history_enriched(selected_days)
+        risk_working = _load_history_risk(selected_days)
         source_label = f"history:{selected_days}d"
-        window_hours = selected_days * 24
     else:
-        hours = 24 if window_mode == "Last 24h" else 48
-        window_hours = hours
-        if snapshot_df.empty:
-            if history_max == 0:
-                st.info("Snapshot unavailable and no history data present.")
-                return
-            selected_days = min(max(1, hours // 24), history_max)
-            window_df = _load_history_enriched(selected_days)
-            risk_window = _load_history_risk(selected_days)
-            source_label = f"history:{selected_days}d (fallback)"
-            window_hours = selected_days * 24
+        if window_mode == "Last 48h":
+            mode_key = "48h"
+            default_hours = 48
         else:
-            window_df = _filter_window(snapshot_df, hours)
-            risk_window = snapshot_risk_df
+            mode_key = "24h"
+            default_hours = 24
+        if working_df.empty:
+            if history_max == 0:
+                st.info(
+                    "Snapshot unavailable and no history data present."
+                )
+                return
+            selected_days = min(max(1, default_hours // 24), history_max)
+            working_df = _load_history_enriched(selected_days)
+            risk_working = _load_history_risk(selected_days)
+            source_label = f"history:{selected_days}d (fallback)"
+    if working_df.empty:
+        st.info("No incidents available for the selected window.")
+        return
+    data_min, data_max = _dataset_bounds(working_df)
+    now_utc = data_max or datetime.now(timezone.utc)
+    start, end, label = _window_bounds(
+        now_utc,
+        mode_key,
+        selected_days,
+        default_hours,
+        data_min,
+    )
+    window_df = _filter_time_range(working_df, start, end)
     if window_df.empty:
         st.info("No incidents available for the selected window.")
         return
-
-    toggle_cols = st.columns(3)
-    show_hex = toggle_cols[0].checkbox(
-        "Use hexagons",
-        value=False,
-        key=_wkey("mon", "show_hex"),
+    if isinstance(risk_working, pd.DataFrame):
+        risk_source_df = risk_working
+    else:
+        risk_source_df = pd.DataFrame()
+    risk_window = _filter_risk_range(risk_source_df, start, end)
+    layer_mode = st.radio(
+        "Layer mode",
+        ("Points", "Heatmap", "Hexagons"),
+        index=0,
+        key=_wkey("mon", "layer_mode"),
     )
-    show_os = toggle_cols[1].checkbox(
+    toggle_cols = st.columns(2)
+    show_os = toggle_cols[0].checkbox(
         "Show OpenSky points",
         value=True,
         key=_wkey("mon", "show_os"),
     )
-    show_mnd = toggle_cols[2].checkbox(
+    show_mnd = toggle_cols[1].checkbox(
         "Show MND markers",
         value=True,
         key=_wkey("mon", "show_mnd"),
     )
-
+    use_hexagons = False
+    if layer_mode == "Hexagons":
+        use_hexagons = st.checkbox(
+            "Use hexagons",
+            value=True,
+            key=_wkey("mon", "use_hexagons"),
+        )
     watch_mtime = _path_mtime(WATCHLIST_PATH)
     saved_watchlist = _load_watchlist(str(WATCHLIST_PATH), watch_mtime)
     grid_series = window_df.get("grid_id")
@@ -1711,7 +1890,6 @@ def render_monitor_tab(
             "Watchlist defaults pruned to in-window grids: "
             + ", ".join(missing_saved)
         )
-
     focus_options = ["All grids"] + grid_options
     focus_key = _wkey("mon", "focus")
     st.session_state.setdefault(focus_key, focus_options[0])
@@ -1725,66 +1903,72 @@ def render_monitor_tab(
     )
     selected_grid = None if focus_choice == "All grids" else focus_choice
     st.session_state["selected_grid"] = selected_grid
-
     filter_focus = st.checkbox(
         "Filter to focus grid",
         value=False,
         key=_wkey("mon", "filter_focus"),
     )
     filter_grid = selected_grid if filter_focus else None
-
     view_df = _filter_by_grid(window_df, filter_grid)
-    if isinstance(risk_window, pd.DataFrame):
-        view_risk = _filter_by_grid(risk_window, filter_grid)
-    else:
-        view_risk = pd.DataFrame()
-
+    risk_view = _filter_by_grid(risk_window, filter_grid)
     df_os, df_mnd = _split_sources(view_df)
-    weights_present = _render_incident_map(
+    map_result = _render_incident_map(
         df_os,
         df_mnd,
-        view_risk,
-        show_hex,
+        risk_view,
+        layer_mode,
         show_os,
         show_mnd,
         starred,
         selected_grid,
         "monitor_map",
+        use_hexagons,
     )
-
-    start_text, end_text, span_text = _window_bounds(view_df, window_hours)
+    if map_result.fallback_reason:
+        st.caption(map_result.fallback_reason)
+    if layer_mode == "Points" and map_result.risk_cells > 0:
+        st.caption(
+            f"Try 'Heatmap' to see weighted risk (cells={map_result.risk_cells})."
+        )
+    actual_start, actual_end, requested_hours, actual_hours = _window_stats(
+        view_df, start, end
+    )
     os_count, mnd_count, total = summarize_counts(view_df)
-    map_caption = (
-        f"Map window: {start_text} -> {end_text} ({span_text}) | rows: {total}"
-        f" (OS: {os_count} / MND: {mnd_count}) | "
-        f"Risk weights: {'yes' if weights_present else 'no'}"
+    header_text = (
+        f"Window: {_format_utc(actual_start)} -> {_format_utc(actual_end)} "
+        f"({label}; rows: {total} (OS: {os_count} / MND: {mnd_count}))"
     )
-    st.caption(map_caption)
-
-    _render_window_header(
-        view_df,
-        window_hours,
-        risk_available=weights_present,
-    )
-
-    risk_rows = int(view_risk.shape[0]) if not view_risk.empty else 0
+    st.caption(header_text)
+    if (
+        window_mode in {"Last 24h", "Last 48h"}
+        and actual_hours + 0.1 < requested_hours
+    ):
+        st.caption(
+            f"Only {actual_hours:.1f} h available in snapshot; clamped."
+        )
+    risk_rows = int(risk_view.shape[0]) if not risk_view.empty else 0
     source_caption = (
-        f"Monitor data: source={source_label} rows={total} "
-        f"| OS: {os_count} | MND: {mnd_count} "
-        f"| risk_rows={risk_rows} "
-        f"| Risk weights: {'yes' if weights_present else 'no'}"
+        f"Monitor data: source={source_label} | rows={total} "
+        f"| OS: {os_count} | MND: {mnd_count} | risk_rows={risk_rows} "
+        f"| Risk weights: {'yes' if map_result.weights_present else 'no'}"
     )
     st.caption(source_caption)
-    if snapshot_path is not None and source_label.startswith("snapshot"):
-        st.caption(f"Snapshot file: {snapshot_path.name}")
-
+    if source_label.startswith("snapshot") and snapshot_path is not None:
+        source_note = snapshot_path.name
+    else:
+        source_note = source_label
+    st.caption(
+        "OpenSky points: raw aircraft state vectors in the window. "
+        "MND markers: Taiwan MND daily bulletin centroids. "
+        "Heatmap/Hexagons use risk weights derived from MND text enrichment. "
+        f"Source file: {source_note}"
+    )
     st.subheader("Watch cells")
     watch_df = _watch_cells(view_df, 0.35, True, top_k=5)
     if watch_df.empty:
         st.info("No MND grids in the selected window.")
     else:
         st.dataframe(watch_df.reset_index(drop=True))
-
     st.subheader("MND incidents")
     mnd_table = df_mnd.copy()
     columns = [
@@ -1813,12 +1997,10 @@ def render_monitor_tab(
         st.dataframe(table_to_show[columns])
     else:
         st.info("No MND incidents in the selected window.")
-
     st.subheader("MND anomaly chart")
     render_anomaly_chart(mnd_table)
     st.subheader("LLM brief (24h)")
     render_brief(mnd_table, brief_text)
-
     with st.expander("How this works / Data & Metrics"):
         st.markdown(
             "**How data is collected**\n\n"
@@ -1826,7 +2008,7 @@ def render_monitor_tab(
             "shown as OS points when available.\n"
             "- **MND bulletins**: daily Taiwan MND summaries parsed offline; "
             "DeepSeek enrichment augments detail when configured.\n"
-            "- **Risk grid**: daily risk CSV powers hex/heat layers; "
+            "- **Risk grid**: daily risk CSV powers heatmap/hex layers; "
             "if weights are missing the view falls back to points.\n\n"
             "**METRICS fields**\n"
             "- `opensky_points`, `mnd_rows`, `merged_rows`, `enriched_rows` "
@@ -1840,19 +2022,12 @@ def render_monitor_tab(
         if metrics_line:
             st.code(metrics_line)
         else:
-            st.caption("No METRICS logs found yet.")
+            st.caption("Metrics unavailable.")
 
 
 
 
-def render_history_tab(
-    history_days: list[str],
-    hours: int = 24,
-    cutoff: float | None = None,
-    only_mnd: bool = False,
-    map_layer: str = "hex",
-    risk_df: pd.DataFrame | None = None,
-) -> None:
+def render_history_tab(history_days: list[str]) -> None:
     st.subheader("History Controls")
     if not history_days:
         st.info("No history available. Run backfill.")
@@ -1869,41 +2044,45 @@ def render_history_tab(
     if history_df.empty:
         st.info("No incidents available for the selected history window.")
         return
-    risk_table = (
-        risk_df
-        if isinstance(risk_df, pd.DataFrame)
-        else _load_history_risk(days)
+    risk_table = _load_history_risk(days)
+    data_min, data_max = _dataset_bounds(history_df)
+    now_utc = data_max or datetime.now(timezone.utc)
+    start, end, label = _window_bounds(
+        now_utc,
+        "ndays",
+        days,
+        days * 24,
+        data_min,
     )
-    if only_mnd and "source" in history_df.columns:
-        history_df = history_df[
-            history_df["source"].astype(str).str.upper().eq("MND")
-        ].copy()
-        if history_df.empty:
-            st.info("No MND incidents in the selected history window.")
-            return
-
-    show_hex_default = map_layer.lower() == "hex"
-    show_os_default = not only_mnd
-    toggle_cols = st.columns(3)
-    show_hex = toggle_cols[0].checkbox(
-        "Use hexagons",
-        value=show_hex_default,
-        key=_wkey("hist", "show_hex"),
+    window_df = _filter_time_range(history_df, start, end)
+    risk_window = _filter_risk_range(risk_table, start, end)
+    layer_mode = st.radio(
+        "Layer mode",
+        ("Points", "Heatmap", "Hexagons"),
+        index=0,
+        key=_wkey("hist", "layer_mode"),
     )
-    show_os = toggle_cols[1].checkbox(
+    toggle_cols = st.columns(2)
+    show_os = toggle_cols[0].checkbox(
         "Show OpenSky points",
-        value=show_os_default,
+        value=True,
         key=_wkey("hist", "show_os"),
     )
-    show_mnd = toggle_cols[2].checkbox(
+    show_mnd = toggle_cols[1].checkbox(
         "Show MND markers",
         value=True,
         key=_wkey("hist", "show_mnd"),
     )
-
+    use_hexagons = False
+    if layer_mode == "Hexagons":
+        use_hexagons = st.checkbox(
+            "Use hexagons",
+            value=True,
+            key=_wkey("hist", "use_hexagons"),
+        )
     watch_mtime = _path_mtime(WATCHLIST_PATH)
     saved_watchlist = _load_watchlist(str(WATCHLIST_PATH), watch_mtime)
-    grid_series = history_df.get("grid_id")
+    grid_series = window_df.get("grid_id")
     grid_options = (
         sorted({str(item).strip() for item in grid_series.dropna() if item})
         if grid_series is not None
@@ -1931,61 +2110,62 @@ def render_history_tab(
     )
     selected_grid = None if focus_choice == "All grids" else focus_choice
     st.session_state["selected_grid"] = selected_grid
-
     filter_focus = st.checkbox(
         "Filter to focus grid",
         value=False,
         key=_wkey("hist", "filter_focus"),
     )
     filter_grid = selected_grid if filter_focus else None
-
-    view_df = _filter_by_grid(history_df, filter_grid)
-    view_risk = _filter_by_grid(risk_table, filter_grid)
+    view_df = _filter_by_grid(window_df, filter_grid)
+    risk_view = _filter_by_grid(risk_window, filter_grid)
     df_os, df_mnd = _split_sources(view_df)
-    weights_present = _render_incident_map(
+    map_result = _render_incident_map(
         df_os,
         df_mnd,
-        view_risk,
-        show_hex,
+        risk_view,
+        layer_mode,
         show_os,
         show_mnd,
         starred,
         selected_grid,
         "history_map",
+        use_hexagons,
     )
-
-    window_hours = max(days * 24, hours)
-    start_text, end_text, span_text = _window_bounds(view_df, window_hours)
+    if map_result.fallback_reason:
+        st.caption(map_result.fallback_reason)
+    if layer_mode == "Points" and map_result.risk_cells > 0:
+        st.caption(
+            f"Try 'Heatmap' to see weighted risk (cells={map_result.risk_cells})."
+        )
+    actual_start, actual_end, _, _ = _window_stats(
+        view_df, start, end
+    )
     os_count, mnd_count, total = summarize_counts(view_df)
-    map_caption = (
-        f"Map window: {start_text} -> {end_text} ({span_text}) | rows: {total}"
-        f" (OS: {os_count} / MND: {mnd_count}) | "
-        f"Risk weights: {'yes' if weights_present else 'no'}"
+    header_text = (
+        f"Window: {_format_utc(actual_start)} -> {_format_utc(actual_end)} "
+        f"({label}; rows: {total} (OS: {os_count} / MND: {mnd_count}))"
     )
-    st.caption(map_caption)
-
-    _render_window_header(
-        view_df,
-        window_hours,
-        risk_available=weights_present,
-    )
-
-    risk_rows = int(view_risk.shape[0]) if not view_risk.empty else 0
+    st.caption(header_text)
+    risk_rows = int(risk_view.shape[0]) if not risk_view.empty else 0
     history_caption = (
-        f"History window: days={days} rows={total} "
+        f"History window: days={days} | rows={total} "
         f"| OS: {os_count} | MND: {mnd_count} | risk_rows={risk_rows} "
-        f"| Risk weights: {'yes' if weights_present else 'no'}"
+        f"| Risk weights: {'yes' if map_result.weights_present else 'no'}"
     )
     st.caption(history_caption)
-
+    latest_note = history_days[-1] if history_days else "n/a"
+    st.caption(
+        "OpenSky points: raw aircraft state vectors in the window. "
+        "MND markers: Taiwan MND daily bulletin centroids. "
+        "Heatmap/Hexagons use risk weights derived from MND text enrichment. "
+        f"History snapshot: {latest_note}"
+    )
     st.subheader("Watch cells")
-    threshold = cutoff if cutoff is not None else 0.35
-    watch_df = _watch_cells(view_df, threshold, True, top_k=5)
+    watch_df = _watch_cells(view_df, 0.35, True, top_k=5)
     if watch_df.empty:
         st.info("No MND grids in the selected history window.")
     else:
         st.dataframe(watch_df.reset_index(drop=True))
-
     st.subheader("MND incidents")
     if df_mnd.empty:
         st.info("No MND incidents in this history range.")
@@ -2005,18 +2185,16 @@ def render_history_tab(
         for column in columns:
             if column not in history_table.columns:
                 history_table[column] = ""
-        history_table["summary_one_line"] = history_table[
-            "summary_one_line"
-        ].apply(_friendly_summary)
+        history_table["summary_one_line"] = history_table["summary_one_line"].apply(
+            _friendly_summary
+        )
         if len(history_table) > MAX_TABLE_ROWS:
             history_table = history_table.iloc[:MAX_TABLE_ROWS]
-            st.caption(
-                "Table truncated for display (showing first 1000 rows)."
-            )
+            st.caption("Table truncated for display (showing first 1000 rows).")
         st.dataframe(history_table[columns])
-
     st.subheader("MND anomaly chart")
     render_anomaly_chart(df_mnd)
+
 
 
 def main() -> None:
