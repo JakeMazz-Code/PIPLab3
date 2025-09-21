@@ -47,6 +47,13 @@ GRID_STEP = 0.5
 THRESH_OS_MIN = 50  # retry with MAX when points are extremely sparse
 _AUTO_RETRY_MAX_RAW = os.getenv("AUTO_RETRY_MAX", "false").lower()
 AUTO_RETRY_MAX_ENABLED = _AUTO_RETRY_MAX_RAW in {"1", "true", "t", "yes", "y"}
+_MAX_MND_ENRICH_RAW = os.getenv("MAX_MND_ENRICH", "0").strip()
+try:
+    MAX_MND_ENRICH = int(_MAX_MND_ENRICH_RAW or "0")
+except ValueError:
+    MAX_MND_ENRICH = 0
+if MAX_MND_ENRICH < 0:
+    MAX_MND_ENRICH = 0
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 MND_LIST_URL = "https://www.mnd.gov.tw/PublishTable.aspx"
 MND_PARAMS = {
@@ -562,10 +569,15 @@ def clean_merge(
             mnd_df.loc[needs_guess, "grid_id"] = mnd_df.loc[
                 needs_guess, "where_guess"
             ].apply(mnd_where_to_grid)
-    combined = pd.concat(
-        [os_clean[os_cols], mnd_df[os_cols]],
-        ignore_index=True,
-    )
+    frames: list[pd.DataFrame] = []
+    if not os_clean.empty:
+        frames.append(os_clean[os_cols])
+    if not mnd_df.empty:
+        frames.append(mnd_df[os_cols])
+    if not frames:
+        combined = pd.DataFrame(columns=os_cols)
+    else:
+        combined = pd.concat(frames, ignore_index=True)
     combined["dt"] = pd.to_datetime(combined["dt"], utc=True)
     return combined
 
@@ -880,13 +892,23 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     metrics["merged_rows"] = len(merged)
     grid_density, hour_density = _prepare_validation(os_df)
     mnd_df = merged[merged["source"] == "MND"].copy()
+    if MAX_MND_ENRICH > 0 and len(mnd_df) > MAX_MND_ENRICH:
+        logger.info(
+            "Limiting MND incidents to %s via MAX_MND_ENRICH",
+            MAX_MND_ENRICH,
+        )
+        mnd_df = mnd_df.head(MAX_MND_ENRICH)
     mnd_df = _apply_validation(mnd_df, grid_density, hour_density, metrics)
     reset_llm_metrics()
     logger.info("Enriching %s incidents via DeepSeek", len(mnd_df))
     enriched_mnd = enrich_incidents(mnd_df)
     enriched_mnd = _assign_mnd_grids_from_guess(enriched_mnd)
     os_only = merged[merged["source"] != "MND"].copy()
-    combined = pd.concat([os_only, enriched_mnd], ignore_index=True)
+    merge_frames = [df for df in (os_only, enriched_mnd) if not df.empty]
+    if merge_frames:
+        combined = pd.concat(merge_frames, ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=merged.columns)
     combined = _assign_mnd_grids_from_guess(combined)
     combined["dt"] = pd.to_datetime(combined["dt"], utc=True)
     enriched_path = _write_enriched(combined, prefix)
@@ -898,7 +920,11 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     metrics["enriched_rows"] = len(enriched_mnd)
     needs_review_count = 0
     if "needs_review" in enriched_mnd.columns:
-        review_series = enriched_mnd["needs_review"].fillna(False).astype(bool)
+        review_series = enriched_mnd["needs_review"]
+        review_series = review_series.infer_objects(copy=False)
+        review_series = review_series.fillna(False)
+        review_series = review_series.astype("bool", copy=False)
+        enriched_mnd["needs_review"] = review_series
         needs_review_count = int(review_series.sum())
     metrics["needs_review_count"] = needs_review_count
     llm_metrics = get_llm_metrics()
