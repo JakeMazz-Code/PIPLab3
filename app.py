@@ -1481,6 +1481,72 @@ def _as_pdk_layers(seq: Iterable[Any] | None) -> list[Any]:
     return out
 
 
+
+def _to_py_primitive(value: Any) -> Any:
+    """Convert common data types to JSON-safe primitives."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    try:
+        import numpy as _np  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        _np = None
+    import datetime as _dt
+
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if _np is not None and hasattr(_np, "generic"):
+        if isinstance(value, _np.generic):
+            return value.item()
+    if isinstance(value, tuple):
+        return [
+            _to_py_primitive(item)
+            for item in value
+        ]
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return None
+
+
+
+def _records_json_safe(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return list of JSON-safe dict rows, limited to selected columns."""
+    if df is None or df.empty:
+        return []
+    working = df.copy()
+    if columns is not None:
+        keep = [column for column in columns if column in working.columns]
+        working = working.loc[:, keep]
+    if "tooltip" in working.columns:
+        working["tooltip"] = working["tooltip"].astype(str)
+    records = working.to_dict(orient="records")
+    safe_records: list[dict[str, Any]] = []
+    for record in records:
+        safe_records.append(
+            {key: _to_py_primitive(value) for key, value in record.items()}
+        )
+    return safe_records
+
+
+
+def _js_position_expr() -> str:
+    """Return a standardized deck.gl get_position expression."""
+    return "[lon, lat]"
+
+
 def _collect_map_points(
     df_os: pd.DataFrame,
     df_mnd: pd.DataFrame,
@@ -1515,6 +1581,75 @@ def _collect_map_points(
         combined = pd.concat(frames, ignore_index=True)
         return combined.dropna(subset=["lat", "lon"])
     return pd.DataFrame(columns=["lat", "lon"])
+
+
+
+def _safe_pydeck_chart(
+    deck: "pdk.Deck",
+    fallback_points: pd.DataFrame,
+    widget_key: str,
+    debug: bool = False,
+) -> bool:
+    """Render deck when possible; otherwise fallback to st.map."""
+    try:
+        deck.to_json()
+    except Exception as exc:  # pragma: no cover - visualization guard
+        st.caption(
+            "Map fallback (serialization failed: "
+            f"{type(exc).__name__})"
+        )
+        if fallback_points is not None and not fallback_points.empty:
+            st.map(
+                fallback_points[["lat", "lon"]],
+                use_container_width=True,
+                key=f"{widget_key}_fallback",
+            )
+        if debug:
+            st.code(str(exc))
+        return False
+    st.pydeck_chart(
+        deck,
+        use_container_width=True,
+        height=MAP_HEIGHT,
+        key=widget_key,
+    )
+    return True
+
+
+
+def _debug_serialize_layers(
+    layers: Iterable[Any], view: "pdk.ViewState"
+) -> None:
+    """Log first layer that fails to serialize for troubleshooting."""
+    if pdk is None:
+        return
+    for index, layer in enumerate(layers):
+        try:
+            pdk.Deck(
+                layers=[layer],
+                initial_view_state=view,
+                map_provider="carto",
+                map_style="dark",
+            ).to_json()
+        except Exception as exc:  # pragma: no cover - debug aid
+            st.write(
+                f"Layer #{index} serialization failed: "
+                f"{type(layer).__name__} -> {type(exc).__name__}: {exc}"
+            )
+            data = getattr(layer, "data", None)
+            st.write("data type:", type(data).__name__)
+            try:
+                if isinstance(data, pd.DataFrame):
+                    st.write("data dtypes:", data.dtypes.to_dict())
+                    if not data.empty:
+                        sample = data.iloc[0].to_dict()
+                        st.write(
+                            "sample types:",
+                            {k: type(v).__name__ for k, v in sample.items()},
+                        )
+            except Exception:
+                pass
+            break
 
 
 def _prepare_risk_layer(risk_df: pd.DataFrame) -> pd.DataFrame:
@@ -1587,11 +1722,15 @@ def _build_map_layers(
 
     if layer_mode == "Heatmap":
         if weights_present:
+            heatmap_data = _records_json_safe(
+                risk_layer,
+                ["lon", "lat", "weight"],
+            )
             layers.append(
                 pdk.Layer(
                     "HeatmapLayer",
-                    data=risk_layer,
-                    get_position="[lon, lat]",
+                    data=heatmap_data,
+                    get_position=_js_position_expr(),
                     get_weight="weight",
                     radius_pixels=48,
                 )
@@ -1605,11 +1744,12 @@ def _build_map_layers(
         if use_hexagons:
             hex_points = _hex_source(os_points, mnd_points)
             if not hex_points.empty:
+                hex_data = _records_json_safe(hex_points, ["lon", "lat"])
                 layers.append(
                     pdk.Layer(
                         "HexagonLayer",
-                        data=hex_points,
-                        get_position="[lon, lat]",
+                        data=hex_data,
+                        get_position=_js_position_expr(),
                         radius=20000,
                         elevation_scale=40,
                         elevation_range=[0, 2000],
@@ -1627,13 +1767,24 @@ def _build_map_layers(
             effective_mode = "Points"
             fallback_reason = "Hexagon layer disabled; showing points."
 
+    os_data = _records_json_safe(os_points, ["lon", "lat", "tooltip"])
+    mnd_columns = [
+        "lon",
+        "lat",
+        "tooltip",
+        "grid_id",
+        "risk_score",
+        "severity_0_5",
+    ]
+    mnd_data = _records_json_safe(mnd_points, mnd_columns)
+
     if effective_mode == "Points":
-        if show_os and not os_points.empty:
+        if show_os and os_data:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=os_points,
-                    get_position="[lon, lat]",
+                    data=os_data,
+                    get_position=_js_position_expr(),
                     get_radius=90,
                     radius_min_pixels=3,
                     radius_max_pixels=8,
@@ -1644,12 +1795,12 @@ def _build_map_layers(
                     auto_highlight=True,
                 )
             )
-        if show_mnd and not mnd_points.empty:
+        if show_mnd and mnd_data:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=mnd_points,
-                    get_position="[lon, lat]",
+                    data=mnd_data,
+                    get_position=_js_position_expr(),
                     get_radius=120,
                     radius_min_pixels=4,
                     radius_max_pixels=10,
@@ -1661,12 +1812,12 @@ def _build_map_layers(
                 )
             )
     else:
-        if show_os and not os_points.empty:
+        if show_os and os_data:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=os_points,
-                    get_position="[lon, lat]",
+                    data=os_data,
+                    get_position=_js_position_expr(),
                     get_radius=80,
                     radius_min_pixels=2,
                     radius_max_pixels=6,
@@ -1674,12 +1825,12 @@ def _build_map_layers(
                     pickable=True,
                 )
             )
-        if show_mnd and not mnd_points.empty:
+        if show_mnd and mnd_data:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=mnd_points,
-                    get_position="[lon, lat]",
+                    data=mnd_data,
+                    get_position=_js_position_expr(),
                     get_radius=110,
                     radius_min_pixels=3,
                     radius_max_pixels=8,
@@ -1698,12 +1849,16 @@ def _build_map_layers(
             star_rows.append(
                 {"grid_id": grid_id, "lat": centroid[0], "lon": centroid[1]}
             )
-        if star_rows:
+        star_data = _records_json_safe(
+            pd.DataFrame(star_rows),
+            ["lon", "lat", "grid_id"],
+        )
+        if star_data:
             layers.append(
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=pd.DataFrame(star_rows),
-                    get_position="[lon, lat]",
+                    data=star_data,
+                    get_position=_js_position_expr(),
                     get_radius=1,
                     radius_scale=6000,
                     radius_min_pixels=7,
@@ -1725,20 +1880,25 @@ def _build_map_layers(
                     }
                 ]
             )
-            layers.append(
-                pdk.Layer(
-                    "ScatterplotLayer",
-                    data=focus_df,
-                    get_position="[lon, lat]",
-                    get_radius=1,
-                    radius_scale=9000,
-                    radius_min_pixels=9,
-                    filled=False,
-                    get_line_color=[255, 215, 0, 240],
-                    line_width_min_pixels=3,
-                    pickable=False,
-                )
+            focus_data = _records_json_safe(
+                focus_df,
+                ["lon", "lat", "grid_id"],
             )
+            if focus_data:
+                layers.append(
+                    pdk.Layer(
+                        "ScatterplotLayer",
+                        data=focus_data,
+                        get_position=_js_position_expr(),
+                        get_radius=1,
+                        radius_scale=9000,
+                        radius_min_pixels=9,
+                        filled=False,
+                        get_line_color=[255, 215, 0, 240],
+                        line_width_min_pixels=3,
+                        pickable=False,
+                    )
+                )
     return layers, effective_mode, weights_present, risk_cells, fallback_reason
 
 
@@ -1785,22 +1945,22 @@ def _render_incident_map(
         message = "pydeck unavailable; using fallback map."
 
     layers = _as_pdk_layers(layers_raw)
+    fallback_points = _collect_map_points(
+        df_os,
+        df_mnd,
+        show_os,
+        show_mnd,
+        starred,
+        selected_grid,
+    )
     if not layers:
-        fallback_points = _collect_map_points(
-            df_os,
-            df_mnd,
-            show_os,
-            show_mnd,
-            starred,
-            selected_grid,
-        )
         if fallback_points.empty:
             st.info("No geolocated data for this window.")
         else:
             st.map(
                 fallback_points[["lat", "lon"]],
                 use_container_width=True,
-                key=f"{widget_ns}_fallback_map",
+                key=f"{widget_ns}_fallback",
             )
             st.caption("Map fallback (no valid layers).")
         message = message or "No pydeck layers resolved."
@@ -1819,12 +1979,13 @@ def _render_incident_map(
         map_style="dark",
         tooltip={"text": "{tooltip}"},
     )
-    st.pydeck_chart(
+    rendered = _safe_pydeck_chart(
         deck,
-        use_container_width=True,
-        height=MAP_HEIGHT,
-        key=f"{widget_ns}_deck",
+        fallback_points,
+        f"{widget_ns}_deck",
     )
+    if not rendered:
+        _debug_serialize_layers(layers, view)
     return MapRenderResult(
         weights_present,
         effective_mode,
