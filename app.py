@@ -33,10 +33,24 @@ OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
 MAX_TABLE_ROWS = 1000
 
 
-@st.cache_data(ttl=60)
-def _latest_parquet(directory: Path) -> Path | None:
+def _path_mtime(path: Path) -> float:
+    """Return a safe modification time for cache keys."""
+
+    path = Path(path)
+    if not path.exists():
+        return 0.0
     try:
-        candidates = list(directory.glob("*.parquet"))
+        return path.stat().st_mtime
+    except OSError:
+        return time.time()
+
+
+@st.cache_data(ttl=60)
+def _latest_parquet(directory: Path, dir_mtime: float) -> Path | None:
+    _ = dir_mtime
+    path = Path(directory)
+    try:
+        candidates = list(path.glob("*.parquet"))
     except Exception:
         return None
     if not candidates:
@@ -399,7 +413,8 @@ def compute_kpis(
 def load_artifacts(
     parquet_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
-    parquet_path = _latest_parquet(parquet_dir)
+    dir_mtime = _path_mtime(parquet_dir)
+    parquet_path = _latest_parquet(parquet_dir, dir_mtime)
     if parquet_path is None:
         st.error("No enriched parquet files found.")
         return pd.DataFrame(), pd.DataFrame(), None
@@ -434,6 +449,8 @@ def load_artifacts(
     if brief_path.exists():
         brief_text = brief_path.read_text(encoding="utf-8")
     return df, risk_df, brief_text
+
+
 def _atomic_write_json(path: Path, payload: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,7 +473,10 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
         raise
 
 
-def _load_watchlist(path: Path) -> list[str]:
+@st.cache_data(ttl=60)
+def _load_watchlist(path_str: str, mtime: float) -> list[str]:
+    _ = mtime
+    path = Path(path_str)
     if not path.exists():
         return []
     try:
@@ -471,6 +491,10 @@ def _load_watchlist(path: Path) -> list[str]:
 def _save_watchlist(path: Path, grids: Iterable[str]) -> list[str]:
     unique = sorted({str(item) for item in grids if item})
     _atomic_write_json(path, unique)
+    try:
+        _load_watchlist.clear()
+    except AttributeError:
+        pass
     return unique
 
 
@@ -680,7 +704,9 @@ def _render_history_summary(summary: pd.DataFrame) -> None:
 
 
 @st.cache_data(ttl=60)
-def _load_history_manifest(path: Path) -> dict[str, Any]:
+def _load_history_manifest(path_str: str, mtime: float) -> dict[str, Any]:
+    _ = mtime
+    path = Path(path_str)
     if not path.exists():
         return {"days": []}
     try:
@@ -717,7 +743,8 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
     if map_df.empty:
         st.info("No grid centroids available for map display.")
         return
-    watchlist = _load_watchlist(WATCHLIST_PATH)
+    watch_mtime = _path_mtime(WATCHLIST_PATH)
+    watchlist = _load_watchlist(str(WATCHLIST_PATH), watch_mtime)
     starred_coords: list[dict[str, float | str]] = []
     for grid_id in watchlist:
         centroid = _grid_to_centroid(grid_id)
@@ -1011,7 +1038,8 @@ def render_arcade_tab(
         st.dataframe(streak_table.reset_index(drop=True))
     else:
         st.info("No grids are above the cutoff consecutively.")
-    watchlist = _load_watchlist(watchlist_path)
+    watch_mtime = _path_mtime(watchlist_path)
+    watchlist = _load_watchlist(str(watchlist_path), watch_mtime)
     available_grids = sorted(
         {str(item) for item in arcade_df["grid_id"].dropna()}
     )
@@ -1254,7 +1282,8 @@ def _render_history_day_view(
 
 def _prepare_snapshot_day(only_mnd: bool) -> dict[str, Any] | None:
     """Build playback payload for the latest enriched 24h snapshot."""
-    parquet_path = _latest_parquet(ENRICHED_DIR)
+    dir_mtime = _path_mtime(ENRICHED_DIR)
+    parquet_path = _latest_parquet(ENRICHED_DIR, dir_mtime)
     if parquet_path is None:
         return None
     try:
@@ -1543,7 +1572,10 @@ def main() -> None:
     analyst_source_df = filtered_window
     analyst_window_df = display_df
     arcade_window_df = display_df
-    manifest = _load_history_manifest(HISTORY_INDEX_PATH)
+    manifest_mtime = _path_mtime(HISTORY_INDEX_PATH)
+    manifest = _load_history_manifest(
+        str(HISTORY_INDEX_PATH), manifest_mtime
+    )
     analyst_tab, arcade_tab, history_tab = st.tabs(
         ["Analyst", "Arcade", "History"]
     )
@@ -1626,7 +1658,8 @@ def main() -> None:
     with history_tab:
         render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
     sidebar.markdown("---")
-    latest_parquet = _latest_parquet(ENRICHED_DIR)
+    dir_mtime = _path_mtime(ENRICHED_DIR)
+    latest_parquet = _latest_parquet(ENRICHED_DIR, dir_mtime)
     if latest_parquet is not None:
         sidebar.download_button(
             label="Download incidents parquet",
