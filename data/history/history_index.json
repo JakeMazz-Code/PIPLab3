@@ -1,32 +1,68 @@
 {
-  "generated_at": "2025-09-19T22:41:02.187075+00:00",
+  "generated_at": "2025-09-21T17:19:17.577343+00:00",
   "days": [
+    {
+      "date": "2025-09-14",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250914.parquet",
+      "incident_size": 21778,
+      "incident_mtime": "2025-09-21T17:11:26.141825+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250914.csv",
+      "risk_size": 2109,
+      "risk_mtime": "2025-09-21T17:11:26.157894+00:00"
+    },
+    {
+      "date": "2025-09-15",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250915.parquet",
+      "incident_size": 22098,
+      "incident_mtime": "2025-09-21T17:12:44.667694+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250915.csv",
+      "risk_size": 2294,
+      "risk_mtime": "2025-09-21T17:12:44.687694+00:00"
+    },
     {
       "date": "2025-09-16",
       "incident_path": "data\\history\\incidents_enriched\\incidents_20250916.parquet",
-      "incident_size": 13268,
-      "incident_mtime": "2025-09-19T05:24:28.880345+00:00",
+      "incident_size": 22214,
+      "incident_mtime": "2025-09-21T17:14:03.936647+00:00",
       "risk_path": "data\\history\\daily_grid_risk\\risk_20250916.csv",
-      "risk_size": 574,
-      "risk_mtime": "2025-09-19T05:24:28.907380+00:00"
+      "risk_size": 2224,
+      "risk_mtime": "2025-09-21T17:14:03.953156+00:00"
     },
     {
       "date": "2025-09-17",
       "incident_path": "data\\history\\incidents_enriched\\incidents_20250917.parquet",
-      "incident_size": 13268,
-      "incident_mtime": "2025-09-19T05:24:41.714211+00:00",
+      "incident_size": 21784,
+      "incident_mtime": "2025-09-21T17:15:23.523655+00:00",
       "risk_path": "data\\history\\daily_grid_risk\\risk_20250917.csv",
-      "risk_size": 574,
-      "risk_mtime": "2025-09-19T05:24:41.733698+00:00"
+      "risk_size": 1975,
+      "risk_mtime": "2025-09-21T17:15:23.552659+00:00"
     },
     {
       "date": "2025-09-18",
       "incident_path": "data\\history\\incidents_enriched\\incidents_20250918.parquet",
-      "incident_size": 13268,
-      "incident_mtime": "2025-09-19T05:24:55.219040+00:00",
+      "incident_size": 21847,
+      "incident_mtime": "2025-09-21T17:16:42.219764+00:00",
       "risk_path": "data\\history\\daily_grid_risk\\risk_20250918.csv",
-      "risk_size": 574,
-      "risk_mtime": "2025-09-19T05:24:55.246296+00:00"
+      "risk_size": 1925,
+      "risk_mtime": "2025-09-21T17:16:42.233047+00:00"
+    },
+    {
+      "date": "2025-09-19",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250919.parquet",
+      "incident_size": 22181,
+      "incident_mtime": "2025-09-21T17:17:59.093852+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250919.csv",
+      "risk_size": 2260,
+      "risk_mtime": "2025-09-21T17:17:59.106050+00:00"
+    },
+    {
+      "date": "2025-09-20",
+      "incident_path": "data\\history\\incidents_enriched\\incidents_20250920.parquet",
+      "incident_size": 22003,
+      "incident_mtime": "2025-09-21T17:19:17.562248+00:00",
+      "risk_path": "data\\history\\daily_grid_risk\\risk_20250920.csv",
+      "risk_size": 2324,
+      "risk_mtime": "2025-09-21T17:19:17.574342+00:00"
     }
   ]
 }

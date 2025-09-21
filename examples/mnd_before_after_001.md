@@ -1,6 +1,6 @@
 # MND Bulletin Enrichment
 
-**Raw snippet**: 中共解放軍臺海周邊海、空域動態 (點閱次數：735次)
+**Raw snippet**: 中共解放軍臺海周邊海、空域動態 (點閱次數：540次)
 
 **Enriched JSON**:
 
@@ -13,6 +13,6 @@
     "People's Liberation Army"
   ],
   "geo_quality": "low",
-  "summary_one_line": "PLA activity reported in Taiwan Strait area with unspecified details."
+  "summary_one_line": "PLA activity reported in sea and airspace around Taiwan Strait."
 }
 ```

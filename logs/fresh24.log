@@ -1,0 +1,10 @@
+2025-09-21 13:07:57,844 INFO __main__ Starting extraction phase
+2025-09-21 13:07:58,660 INFO __main__ OpenSky (rest) states=26 for WIDE bbox
+2025-09-21 13:07:58,660 INFO __main__ OpenSky sparse (26); retrying once with MAX bbox.
+2025-09-21 13:07:59,399 INFO __main__ OpenSky (rest) states=85 for MAX bbox
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:975: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 13:08:01,173 INFO __main__ Enriching 10 incidents via DeepSeek
+2025-09-21 13:09:16,140 INFO __main__ Enriched dataset written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\incidents_enriched_2025092117.parquet
+2025-09-21 13:09:16,150 INFO __main__ Daily grid risk written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\daily_grid_risk.csv
+METRICS | opensky_points=85 mnd_rows=10 merged_rows=95 enriched_rows=10 llm_success=10 llm_invalid_json=0 llm_retries=0 needs_review_count=0 validation_sparse_fallbacks=10 os_anom_rows=10 wall_ms=78313
