@@ -923,12 +923,19 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         _render_fallback()
 
 
+
+def _wkey(ns: str, name: str) -> str:
+    """Stable Streamlit widget key using a small namespace."""
+
+    return f"{ns}__{name}"
+
+
 def render_anomaly_chart(df: pd.DataFrame) -> None:
     if df.empty or "validation_score" not in df.columns:
         st.info("No validation scores available for chart.")
         return
     chart_df = df.copy()
-    chart_df["dt_hour"] = chart_df["dt"].dt.floor("H")
+    chart_df["dt_hour"] = chart_df["dt"].dt.floor("h")
     grouped = (
         chart_df.groupby("dt_hour")["validation_score"].mean().reset_index()
     )
@@ -964,6 +971,7 @@ def render_analyst_tab(
     only_mnd: bool,
     map_layer: str,
     brief_text: str | None,
+    widget_ns: str = "analyst",
 ) -> None:
     st.subheader("Heatmap")
     render_heatmap(window_df, map_layer)
@@ -1001,6 +1009,7 @@ def render_analyst_tab(
             "Focus grid",
             focus_options,
             index=default_index,
+            key=_wkey(widget_ns, "focus"),
         )
         if focus_choice != current_focus:
             st.session_state["selected_grid"] = focus_choice
@@ -1306,6 +1315,7 @@ def _render_history_day_map(
             only_mnd,
             map_layer,
             None,
+            widget_ns="history",
         )
 
 
