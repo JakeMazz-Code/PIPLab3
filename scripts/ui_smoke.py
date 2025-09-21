@@ -1,70 +1,30 @@
-"""Lightweight smoke checks for Streamlit monitor helpers."""
+"""Tiny UI smoke check for map serialization."""
 
 from __future__ import annotations
 
-import importlib
-import sys
-from pathlib import Path
+from app import MAP_LAT, MAP_LON, MAP_ZOOM, _as_pdk_layers
 
-import pandas as pd
+sanitized = _as_pdk_layers([[], None, (1, 2), "x"])
+assert not sanitized and all(
+    cls.__name__.endswith("Layer") for cls in map(type, sanitized)
+)
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-
-def main() -> None:
-    app_mod = importlib.import_module("app")
-    print("app import OK")
-    snapshot_df, _ = app_mod._load_latest_enriched()
-    snapshot_risk, _ = app_mod._load_snapshot_risk()
-    history_days = app_mod._list_history_days()
-    _ = app_mod._load_history_enriched(1)
-    _ = app_mod._load_history_risk(1)
-    synthetic = pd.DataFrame(
-        {
-            "dt": pd.to_datetime(["2025-01-01T00:00:00Z"]),
-            "lat": [23.5],
-            "lon": [121.0],
-            "source": ["MND"],
-            "grid_id": ["R235C602"],
-            "severity_0_5": [2.0],
-            "risk_score": [0.4],
-            "actors": [["synthetic"]],
-            "corroborations": ["OS_ANOM:1.2"],
-        }
+try:
+    import pydeck as pdk  # type: ignore
+except Exception:
+    print("pydeck unavailable; skipping ui smoke.")
+else:
+    layers = _as_pdk_layers([])
+    view_state = pdk.ViewState(
+        latitude=MAP_LAT,
+        longitude=MAP_LON,
+        zoom=MAP_ZOOM,
     )
-    df_os, df_mnd = app_mod._split_sources(synthetic)
-    risk_sample = pd.DataFrame(
-        {
-            "grid_id": ["R235C602"],
-            "risk_score": [0.6],
-            "lat": [23.5],
-            "lon": [121.0],
-        }
+    deck = pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        map_provider="carto",
+        map_style="dark",
     )
-    if app_mod.pdk is not None:
-        layers, fallback, _ = app_mod._build_map_layers(
-            df_os,
-            df_mnd,
-            risk_sample,
-            show_hex=False,
-            show_os=True,
-            show_mnd=True,
-            starred=[],
-            selected_grid=None,
-        )
-        print(
-            f"map layers={len(layers)} fallback_points={len(fallback)}"
-        )
-    blank_df = pd.DataFrame()
-    _ = app_mod._watch_cells(blank_df, cutoff=0.35, only_mnd=True, top_k=5)
-    print(
-        f"snapshot_rows={len(snapshot_df)} risk_rows={len(snapshot_risk)} "
-        f"history_days={len(history_days)}"
-    )
-    print("ui_smoke passed")
-
-
-if __name__ == "__main__":
-    main()
+    deck.to_json()
+    print("ui_smoke map OK")

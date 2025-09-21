@@ -1330,9 +1330,9 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
             )
         )
     view_state = pdk.ViewState(
-        latitude=23.5,
-        longitude=121.0,
-        zoom=5.0,
+        latitude=MAP_LAT,
+        longitude=MAP_LON,
+        zoom=MAP_ZOOM,
         pitch=30,
     )
     if starred_coords:
@@ -1451,6 +1451,70 @@ def _prepare_mnd_points(df_mnd: pd.DataFrame) -> pd.DataFrame:
     points["tooltip"] = tooltip
     return points
 
+
+
+def _flatten_layers(seq: Iterable[Any] | None) -> Iterable[Any]:
+    """Yield a flat sequence from nested lists/tuples/generators."""
+    for item in seq or []:
+        if isinstance(item, (list, tuple)):
+            for sub_item in _flatten_layers(item):
+                yield sub_item
+        else:
+            yield item
+
+
+def _as_pdk_layers(seq: Iterable[Any] | None) -> list[Any]:
+    """Return a clean list of pdk.Layer, dropping None/invalid items."""
+    try:
+        import pydeck as pdk  # type: ignore
+    except Exception:
+        return []
+    out: list[Any] = []
+    for obj in _flatten_layers(seq):
+        if obj is None:
+            continue
+        if (
+            hasattr(obj, "__class__")
+            and obj.__class__.__name__.endswith("Layer")
+        ):
+            out.append(obj)
+    return out
+
+
+def _collect_map_points(
+    df_os: pd.DataFrame,
+    df_mnd: pd.DataFrame,
+    show_os: bool,
+    show_mnd: bool,
+    starred: Iterable[str] | None,
+    selected_grid: str | None,
+) -> pd.DataFrame:
+    """Return lat/lon frame for fallback st.map usage."""
+    frames: list[pd.DataFrame] = []
+    if show_os:
+        os_points = _prepare_point_dataframe(df_os)
+        if not os_points.empty:
+            frames.append(os_points[["lat", "lon"]])
+    if show_mnd:
+        mnd_points = _prepare_point_dataframe(df_mnd)
+        if not mnd_points.empty:
+            frames.append(mnd_points[["lat", "lon"]])
+    extra_rows: list[dict[str, float]] = []
+    for grid_id in list(starred or []):
+        centroid = _grid_to_centroid(grid_id)
+        if centroid is None:
+            continue
+        extra_rows.append({"lat": centroid[0], "lon": centroid[1]})
+    if selected_grid:
+        centroid = _grid_to_centroid(selected_grid)
+        if centroid is not None:
+            extra_rows.append({"lat": centroid[0], "lon": centroid[1]})
+    if extra_rows:
+        frames.append(pd.DataFrame(extra_rows))
+    if frames:
+        combined = pd.concat(frames, ignore_index=True)
+        return combined.dropna(subset=["lat", "lon"])
+    return pd.DataFrame(columns=["lat", "lon"])
 
 
 def _prepare_risk_layer(risk_df: pd.DataFrame) -> pd.DataFrame:
@@ -1691,39 +1755,69 @@ def _render_incident_map(
     widget_ns: str,
     use_hexagons: bool,
 ) -> MapRenderResult:
-    if pdk is None:
-        st.info("pydeck unavailable; map rendering skipped.")
-        return MapRenderResult(False, "Unavailable", 0, "pydeck unavailable")
-    (
-        layers,
-        effective_mode,
-        weights_present,
-        risk_cells,
-        message,
-    ) = _build_map_layers(
-        layer_mode,
-        df_os,
-        df_mnd,
-        risk_df,
-        show_os,
-        show_mnd,
-        use_hexagons,
-        starred,
-        selected_grid,
-    )
+    layers_raw: Iterable[Any] | None = []
+    effective_mode = layer_mode
+    weights_present = False
+    risk_cells = 0
+    message: str | None = None
+
+    if pdk is not None:
+        (
+            layers_raw,
+            effective_mode,
+            weights_present,
+            risk_cells,
+            message,
+        ) = _build_map_layers(
+            layer_mode,
+            df_os,
+            df_mnd,
+            risk_df,
+            show_os,
+            show_mnd,
+            use_hexagons,
+            starred,
+            selected_grid,
+        )
+    else:
+        weights_present = not risk_df.empty
+        risk_cells = int(risk_df.shape[0]) if not risk_df.empty else 0
+        message = "pydeck unavailable; using fallback map."
+
+    layers = _as_pdk_layers(layers_raw)
     if not layers:
-        st.info("No geolocated data for this window.")
-        return MapRenderResult(weights_present, effective_mode, risk_cells, message)
-    tooltip = {
-        "html": "{tooltip}",
-        "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
-    }
+        fallback_points = _collect_map_points(
+            df_os,
+            df_mnd,
+            show_os,
+            show_mnd,
+            starred,
+            selected_grid,
+        )
+        if fallback_points.empty:
+            st.info("No geolocated data for this window.")
+        else:
+            st.map(
+                fallback_points[["lat", "lon"]],
+                use_container_width=True,
+                key=f"{widget_ns}_fallback_map",
+            )
+            st.caption("Map fallback (no valid layers).")
+        message = message or "No pydeck layers resolved."
+        return MapRenderResult(
+            weights_present,
+            effective_mode,
+            risk_cells,
+            message,
+        )
+
+    view = _map_view_state()
     deck = pdk.Deck(
         layers=layers,
-        initial_view_state=_DEFAULT_VIEW,
+        initial_view_state=view,
         map_provider="carto",
         map_style="dark",
-        tooltip=tooltip,
+        tooltip={"text": "{tooltip}"},
     )
     st.pydeck_chart(
         deck,
@@ -1731,9 +1825,12 @@ def _render_incident_map(
         height=MAP_HEIGHT,
         key=f"{widget_ns}_deck",
     )
-    return MapRenderResult(weights_present, effective_mode, risk_cells, message)
-
-
+    return MapRenderResult(
+        weights_present,
+        effective_mode,
+        risk_cells,
+        message,
+    )
 
 def render_anomaly_chart(df: pd.DataFrame) -> None:
     if df.empty or "validation_score" not in df.columns:
@@ -1928,7 +2025,8 @@ def render_monitor_tab(
         st.caption(map_result.fallback_reason)
     if layer_mode == "Points" and map_result.risk_cells > 0:
         st.caption(
-            f"Try 'Heatmap' to see weighted risk (cells={map_result.risk_cells})."
+            "Try 'Heatmap' to see weighted risk "
+            f"(cells={map_result.risk_cells})."
         )
     actual_start, actual_end, requested_hours, actual_hours = _window_stats(
         view_df, start, end
@@ -2027,24 +2125,42 @@ def render_monitor_tab(
 
 
 
-def render_history_tab(history_days: list[str]) -> None:
+def render_history_tab(
+    history_days: list[str],
+    hours: int | None = None,
+    cutoff: float | None = None,
+    only_mnd: bool | None = None,
+    map_layer: str | None = None,
+    risk_df: pd.DataFrame | None = None,
+) -> None:
     st.subheader("History Controls")
     if not history_days:
         st.info("No history available. Run backfill.")
         return
     history_max = min(14, len(history_days))
+    default_days = min(7, history_max)
+    if hours is not None:
+        try:
+            hours_float = float(hours)
+        except (TypeError, ValueError):
+            hours_float = default_days * 24.0
+        hours_days = max(1, int(round(hours_float / 24.0)))
+        default_days = max(1, min(history_max, hours_days))
     days = st.slider(
         "Days",
         min_value=1,
         max_value=history_max,
-        value=min(7, history_max),
+        value=default_days,
         key=_wkey("hist", "days"),
     )
     history_df = _load_history_enriched(days)
     if history_df.empty:
         st.info("No incidents available for the selected history window.")
         return
-    risk_table = _load_history_risk(days)
+    if isinstance(risk_df, pd.DataFrame):
+        risk_table = risk_df
+    else:
+        risk_table = _load_history_risk(days)
     data_min, data_max = _dataset_bounds(history_df)
     now_utc = data_max or datetime.now(timezone.utc)
     start, end, label = _window_bounds(
@@ -2056,16 +2172,24 @@ def render_history_tab(history_days: list[str]) -> None:
     )
     window_df = _filter_time_range(history_df, start, end)
     risk_window = _filter_risk_range(risk_table, start, end)
+    cutoff_value = float(cutoff) if cutoff is not None else 0.35
+    only_mnd_flag = True if only_mnd is None else bool(only_mnd)
+    layer_options = ("Points", "Heatmap", "Hexagons")
+    default_layer = (
+        map_layer if map_layer in layer_options else layer_options[0]
+    )
+    default_index = layer_options.index(default_layer)
     layer_mode = st.radio(
         "Layer mode",
-        ("Points", "Heatmap", "Hexagons"),
-        index=0,
+        layer_options,
+        index=default_index,
         key=_wkey("hist", "layer_mode"),
     )
     toggle_cols = st.columns(2)
+    show_os_default = True if only_mnd is None else not bool(only_mnd)
     show_os = toggle_cols[0].checkbox(
         "Show OpenSky points",
-        value=True,
+        value=show_os_default,
         key=_wkey("hist", "show_os"),
     )
     show_mnd = toggle_cols[1].checkbox(
@@ -2135,7 +2259,8 @@ def render_history_tab(history_days: list[str]) -> None:
         st.caption(map_result.fallback_reason)
     if layer_mode == "Points" and map_result.risk_cells > 0:
         st.caption(
-            f"Try 'Heatmap' to see weighted risk (cells={map_result.risk_cells})."
+            "Try 'Heatmap' to see weighted risk "
+            f"(cells={map_result.risk_cells})."
         )
     actual_start, actual_end, _, _ = _window_stats(
         view_df, start, end
@@ -2185,12 +2310,15 @@ def render_history_tab(history_days: list[str]) -> None:
         for column in columns:
             if column not in history_table.columns:
                 history_table[column] = ""
-        history_table["summary_one_line"] = history_table["summary_one_line"].apply(
-            _friendly_summary
-        )
+        history_table["summary_one_line"] = history_table[
+            "summary_one_line"
+        ].apply(_friendly_summary)
         if len(history_table) > MAX_TABLE_ROWS:
             history_table = history_table.iloc[:MAX_TABLE_ROWS]
-            st.caption("Table truncated for display (showing first 1000 rows).")
+            st.caption(
+                "Table truncated for display "
+                "(showing first 1000 rows)."
+            )
         st.dataframe(history_table[columns])
     st.subheader("MND anomaly chart")
     render_anomaly_chart(df_mnd)
