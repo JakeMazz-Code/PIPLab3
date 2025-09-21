@@ -379,7 +379,11 @@ def compute_kpis(
                 items = raw
             elif isinstance(raw, str):
                 splits = re.split(r"[;,]", raw)
-                items = [item for item in (part.strip() for part in splits) if item]
+                items = [
+                    item
+                    for item in (part.strip() for part in splits)
+                    if item
+                ]
             elif hasattr(raw, "__iter__"):
                 try:
                     items = list(raw)
@@ -393,7 +397,10 @@ def compute_kpis(
                     continue
                 counts[name] = counts.get(name, 0) + 1
         if counts:
-            actor_name = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+            actor_name = max(
+                counts.items(),
+                key=lambda item: (item[1], item[0]),
+            )[0]
     result["mnd_count"] = current_mnd
     result["mean_risk"] = current_risk
     result["mean_os_anom"] = current_os
@@ -580,6 +587,7 @@ def _prepare_arcade_metrics(window_df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def _load_parquet_df(path_str: str, mtime: float) -> pd.DataFrame:
+    _ = mtime
     try:
         return pd.read_parquet(path_str)
     except Exception:
@@ -587,6 +595,7 @@ def _load_parquet_df(path_str: str, mtime: float) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def _load_csv_df(path_str: str, mtime: float) -> pd.DataFrame:
+    _ = mtime
     try:
         return pd.read_csv(path_str)
     except Exception:
@@ -768,7 +777,6 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 "lon": centroid[1],
             }
     def _render_fallback() -> None:
-        st.info("Map fell back to base map.")
         fb = map_df.rename(
             columns={"lat": "latitude", "lon": "longitude"}
         )
@@ -792,8 +800,24 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         ),
         "style": {"backgroundColor": "#0E1117", "color": "#FAFAFA"},
     }
+    weight_series = (
+        pd.to_numeric(map_df.get("mean_risk"), errors="coerce")
+        if "mean_risk" in map_df.columns
+        else pd.Series(dtype=float)
+    )
+    all_nan_weights = weight_series.empty or weight_series.isna().all()
     small_sample = len(map_df) < 5
-    if map_layer == "Heatmap" and not small_sample:
+    use_scatter = (
+        map_layer not in {"Heatmap", "Hexagons"}
+        or small_sample
+        or all_nan_weights
+    )
+    if (
+        map_layer in {"Heatmap", "Hexagons"}
+        and (small_sample or all_nan_weights)
+    ):
+        st.caption("Map weights unavailable; showing points.")
+    if not use_scatter and map_layer == "Heatmap":
         layers.append(
             pdk.Layer(
                 "HeatmapLayer",
@@ -802,7 +826,7 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
                 get_weight="mean_risk",
             )
         )
-    elif map_layer == "Hexagons" and not small_sample:
+    elif not use_scatter and map_layer == "Hexagons":
         layers.append(
             pdk.Layer(
                 "HexagonLayer",
@@ -828,9 +852,9 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
             )
         )
     view_state = pdk.ViewState(
-        latitude=float(map_df["lat"].mean()),
-        longitude=float(map_df["lon"].mean()),
-        zoom=5.2,
+        latitude=23.5,
+        longitude=121.0,
+        zoom=5.0,
         pitch=30,
     )
     if starred_coords:
@@ -873,7 +897,7 @@ def render_heatmap(view_df: pd.DataFrame, map_layer: str) -> None:
         map_style="dark",
     )
     try:
-        st.pydeck_chart(deck, use_container_width=True)
+        st.pydeck_chart(deck, use_container_width=True, height=520)
     except Exception:
         _render_fallback()
 
@@ -1039,15 +1063,20 @@ def render_arcade_tab(
     else:
         st.info("No grids are above the cutoff consecutively.")
     watch_mtime = _path_mtime(watchlist_path)
-    watchlist = _load_watchlist(str(watchlist_path), watch_mtime)
+    saved_watchlist = _load_watchlist(str(watchlist_path), watch_mtime)
     available_grids = sorted(
         {str(item) for item in arcade_df["grid_id"].dropna()}
     )
     st.subheader("Watchlist")
+    defaults = [grid for grid in saved_watchlist if grid in available_grids]
+    if st.session_state.get("selected_grid") not in available_grids:
+        st.session_state["selected_grid"] = None
     starred = st.multiselect(
-        "Star grids", available_grids, default=watchlist
+        "Star grids", options=available_grids, default=defaults
     )
-    if set(starred) != set(watchlist):
+    if len(saved_watchlist) != len(defaults):
+        st.caption("Some saved grids are not present in this window.")
+    if set(starred) != set(saved_watchlist):
         starred = _save_watchlist(watchlist_path, starred)
         st.success("Watchlist updated.")
     points_by_grid = arcade_df.groupby("grid_id")["row_points"].sum()
@@ -1324,19 +1353,16 @@ def render_history_tab(
         st.session_state[selected_key] = date_options[-1]
 
     slider_key = "history_playback_days"
-    lookback_min = 1
-    lookback_max = max(lookback_min, available_days)
-    default = min(7, lookback_max)
-    st.session_state.setdefault(slider_key, default)
-    current = st.session_state[slider_key]
-    current = max(lookback_min, min(current, lookback_max))
-    if current != st.session_state[slider_key]:
-        st.session_state[slider_key] = current
+    max_value = max(1, available_days)
+    default_value = min(7, max_value)
+    slider_value = st.session_state.get(slider_key, default_value)
+    slider_value = max(1, min(slider_value, max_value))
+    st.session_state[slider_key] = slider_value
     lookback = st.slider(
         "Playback range (days)",
-        min_value=lookback_min,
-        max_value=lookback_max,
-        value=current,
+        min_value=1,
+        max_value=max_value,
+        value=slider_value,
         key=slider_key,
     )
 

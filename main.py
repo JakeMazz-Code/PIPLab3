@@ -19,6 +19,11 @@ import requests
 from bs4 import BeautifulSoup
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+try:
+    from opensky_api import OpenSkyApi  # type: ignore
+except Exception:
+    OpenSkyApi = None
+
 from deepseek_enrichment import (
     enrich_incidents,
     get_llm_metrics,
@@ -61,6 +66,27 @@ MND_PARAMS = {
     "title": "\u570b\u9632\u6d88\u606f",
 }
 REQUEST_TIMEOUT = 20
+
+OPENSKY_STATE_COLUMNS = [
+    "time",
+    "icao24",
+    "callsign",
+    "origin_country",
+    "time_position",
+    "last_contact",
+    "longitude",
+    "latitude",
+    "geo_altitude",
+    "on_ground",
+    "velocity",
+    "true_track",
+    "vertical_rate",
+    "baro_altitude",
+    "squawk",
+    "spi",
+    "position_source",
+    "category",
+]
 
 TAIWAN_LAT_MIN = 20.0
 TAIWAN_LAT_MAX = 26.0
@@ -337,13 +363,81 @@ def _chunked(iterable: Iterable[Any], size: int) -> list[list[Any]]:
     return chunks
 
 
-def _opensky_auth() -> tuple[str, str] | None:
-    """Return optional OpenSky basic auth from environment."""
-    user = os.getenv("OPENSKY_USER")
-    password = os.getenv("OPENSKY_PASS")
+def _env_str(name: str, default: str = "") -> str:
+    """Return an environment variable as a string."""
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _get_opensky_basic() -> tuple[str | None, str | None]:
+    """Return OpenSky basic credentials from the environment."""
+
+    user = _env_str("OPENSKY_USER").strip()
+    password = _env_str("OPENSKY_PASS").strip()
     if user and password:
         return user, password
+    return None, None
+
+
+def _os_bearer_token() -> str | None:
+    """Return an OAuth2 bearer token for OpenSky if available."""
+
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = _env_str(
+        "OPENSKY_TOKEN_URL",
+        "https://auth.opensky-network.org/oauth/token",
+    )
+    client_id = _env_str("OPENSKY_CLIENT_ID").strip()
+    client_secret = _env_str("OPENSKY_CLIENT_SECRET").strip()
+    static = _env_str("OPENSKY_BEARER_TOKEN").strip()
+    if static:
+        return static
+    if not (client_id and client_secret):
+        return None
+    payload = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            text = response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    token = data.get("access_token")
+    if isinstance(token, str) and token:
+        return token
     return None
+
+
+def _bbox_client_order(
+    lamin: float,
+    lomin: float,
+    lamax: float,
+    lomax: float,
+) -> tuple[float, float, float, float]:
+    """Return bbox in client order (min_lat, max_lat, min_lon, max_lon)."""
+
+    return lamin, lamax, lomin, lomax
 
 
 @retry(
@@ -351,17 +445,262 @@ def _opensky_auth() -> tuple[str, str] | None:
     stop=stop_after_attempt(3),
     reraise=True,
 )
-def _fetch_opensky(params: dict[str, Any]) -> dict[str, Any]:
-    """Fetch OpenSky states with retries."""
-    auth = _opensky_auth()
-    response = requests.get(
-        OPENSKY_URL,
-        params=params,
-        auth=auth,
-        timeout=REQUEST_TIMEOUT,
+def _opensky_rest_call(url: str, headers: dict[str, str]) -> str:
+    """Retrieve OpenSky REST payload as text."""
+
+    import urllib.request
+
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _coerce_state_frame(
+    df: pd.DataFrame,
+    bbox_cli: tuple[float, float, float, float],
+) -> pd.DataFrame:
+    """Return state DataFrame with numeric casts and bbox clipping."""
+
+    if df.empty:
+        return df
+    coerced = df.copy()
+    numeric_cols = [
+        "time",
+        "time_position",
+        "last_contact",
+        "longitude",
+        "latitude",
+        "geo_altitude",
+        "velocity",
+        "true_track",
+        "vertical_rate",
+        "baro_altitude",
+        "position_source",
+        "category",
+    ]
+    for column in numeric_cols:
+        if column in coerced.columns:
+            coerced[column] = pd.to_numeric(
+                coerced[column], errors="coerce"
+            )
+    for column in ["on_ground", "spi"]:
+        if column in coerced.columns:
+            coerced[column] = coerced[column].astype("bool", copy=False)
+    for column in ["icao24", "callsign", "origin_country", "squawk"]:
+        if column in coerced.columns:
+            coerced[column] = (
+                coerced[column].fillna("")
+                .astype(str)
+                .str.strip()
+            )
+    coerced = coerced.dropna(subset=["latitude", "longitude"])
+    if coerced.empty:
+        return coerced
+    coerced = coerced[
+        coerced["latitude"].between(bbox_cli[0], bbox_cli[1])
+        & coerced["longitude"].between(bbox_cli[2], bbox_cli[3])
+    ]
+    if coerced.empty:
+        return coerced
+    finite_mask = np.isfinite(coerced["latitude"]) & np.isfinite(
+        coerced["longitude"]
     )
-    response.raise_for_status()
-    return response.json()
+    coerced = coerced[finite_mask]
+    return coerced.reset_index(drop=True)
+
+
+def _fetch_opensky_states(
+    t0: datetime,
+    t1: datetime,
+    bbox_cli: tuple[float, float, float, float],
+    bbox_rest: tuple[float, float, float, float],
+    prefer_client: bool,
+) -> tuple[pd.DataFrame, dict[str, Any], str]:
+    """Fetch OpenSky states via client (Basic) or REST (OAuth2/anon)."""
+
+    import urllib.parse
+
+    timestamp = int(t1.timestamp())
+    window_start = int(t0.timestamp())
+    empty_df = pd.DataFrame(columns=OPENSKY_STATE_COLUMNS)
+    raw_json = json.dumps(
+        {
+            "time": timestamp,
+            "states": [],
+            "window_start": window_start,
+            "path": "rest",
+        },
+        separators=(",", ":"),
+    )
+    basic_user, basic_pass = _get_opensky_basic()
+    if (
+        prefer_client
+        and OpenSkyApi is not None
+        and basic_user
+        and basic_pass
+    ):
+        try:
+            api = OpenSkyApi(basic_user, basic_pass)
+            states = api.get_states(time_secs=timestamp, bbox=bbox_cli)
+        except Exception as exc:  # pragma: no cover - network path
+            logger.warning("OpenSky client fetch failed: %s", exc)
+        else:
+            if states is not None and states.states is not None:
+                raw_states: list[list[Any]] = []
+                records: list[dict[str, Any]] = []
+                for state in states.states:
+                    lat = _parse_float(getattr(state, "latitude", None))
+                    lon = _parse_float(getattr(state, "longitude", None))
+                    if lat is None or lon is None:
+                        continue
+                    if not (
+                        math.isfinite(lat)
+                        and math.isfinite(lon)
+                    ):
+                        continue
+                    raw_row = [
+                        getattr(state, "icao24", None),
+                        getattr(state, "callsign", None),
+                        getattr(state, "origin_country", None),
+                        getattr(state, "time_position", None),
+                        getattr(state, "last_contact", None),
+                        lon,
+                        lat,
+                        getattr(state, "baro_altitude", None),
+                        getattr(state, "on_ground", None),
+                        getattr(state, "velocity", None),
+                        getattr(state, "true_track", None),
+                        getattr(state, "vertical_rate", None),
+                        getattr(state, "sensors", None),
+                        getattr(state, "geo_altitude", None),
+                        getattr(state, "squawk", None),
+                        getattr(state, "spi", None),
+                        getattr(state, "position_source", None),
+                        getattr(state, "category", None),
+                    ]
+                    raw_states.append(raw_row)
+                    records.append(
+                        {
+                            "time": timestamp,
+                            "icao24": raw_row[0],
+                            "callsign": raw_row[1],
+                            "origin_country": raw_row[2],
+                            "time_position": raw_row[3],
+                            "last_contact": raw_row[4],
+                            "longitude": raw_row[5],
+                            "latitude": raw_row[6],
+                            "geo_altitude": raw_row[13],
+                            "on_ground": raw_row[8],
+                            "velocity": raw_row[9],
+                            "true_track": raw_row[10],
+                            "vertical_rate": raw_row[11],
+                            "baro_altitude": raw_row[7],
+                            "squawk": raw_row[14],
+                            "spi": raw_row[15],
+                            "position_source": raw_row[16],
+                            "category": raw_row[17],
+                        }
+                    )
+                if records:
+                    frame = pd.DataFrame.from_records(
+                        records, columns=OPENSKY_STATE_COLUMNS
+                    )
+                else:
+                    frame = empty_df.copy()
+                frame = _coerce_state_frame(frame, bbox_cli)
+                meta = {
+                    "path": "client",
+                    "count": int(frame.shape[0]),
+                }
+                raw_json = json.dumps(
+                    {
+                        "time": timestamp,
+                        "states": raw_states,
+                        "window_start": window_start,
+                        "path": "client",
+                    },
+                    separators=(",", ":"),
+                )
+                return frame, meta, raw_json
+            logger.info("OpenSky client returned no states.")
+
+    headers = {"Accept": "application/json"}
+    token = _os_bearer_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    query = urllib.parse.urlencode(
+        {
+            "lamin": bbox_rest[0],
+            "lomin": bbox_rest[1],
+            "lamax": bbox_rest[2],
+            "lomax": bbox_rest[3],
+        }
+    )
+    url = f"{OPENSKY_URL}?{query}"
+    try:
+        raw_json = _opensky_rest_call(url, headers)
+    except Exception as exc:  # pragma: no cover - network path
+        logger.warning("OpenSky REST fetch failed: %s", exc)
+        raw_json = json.dumps(
+            {
+                "time": timestamp,
+                "states": None,
+                "window_start": window_start,
+                "path": "rest",
+                "error": str(exc),
+            },
+            separators=(",", ":"),
+        )
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError:
+        payload = {"time": timestamp, "states": None}
+    states_list = payload.get("states") or []
+    time_value = payload.get("time", timestamp)
+    records: list[dict[str, Any]] = []
+    for entry in states_list:
+        if not isinstance(entry, (list, tuple)):
+            continue
+        lon = _parse_float(entry[5] if len(entry) > 5 else None)
+        lat = _parse_float(entry[6] if len(entry) > 6 else None)
+        if lat is None or lon is None:
+            continue
+        if not (
+            math.isfinite(lat)
+            and math.isfinite(lon)
+        ):
+            continue
+        records.append(
+            {
+                "time": time_value,
+                "icao24": entry[0] if len(entry) > 0 else None,
+                "callsign": entry[1] if len(entry) > 1 else None,
+                "origin_country": entry[2] if len(entry) > 2 else None,
+                "time_position": entry[3] if len(entry) > 3 else None,
+                "last_contact": entry[4] if len(entry) > 4 else None,
+                "longitude": lon,
+                "latitude": lat,
+                "geo_altitude": entry[13] if len(entry) > 13 else None,
+                "on_ground": entry[8] if len(entry) > 8 else None,
+                "velocity": entry[9] if len(entry) > 9 else None,
+                "true_track": entry[10] if len(entry) > 10 else None,
+                "vertical_rate": entry[11] if len(entry) > 11 else None,
+                "baro_altitude": entry[7] if len(entry) > 7 else None,
+                "squawk": entry[14] if len(entry) > 14 else None,
+                "spi": entry[15] if len(entry) > 15 else None,
+                "position_source": entry[16] if len(entry) > 16 else None,
+                "category": entry[17] if len(entry) > 17 else None,
+            }
+        )
+    if records:
+        frame = pd.DataFrame.from_records(
+            records, columns=OPENSKY_STATE_COLUMNS
+        )
+    else:
+        frame = empty_df.copy()
+    frame = _coerce_state_frame(frame, bbox_cli)
+    meta = {"path": "rest", "count": int(frame.shape[0])}
+    return frame, meta, raw_json
 
 
 def extract_opensky(
@@ -379,67 +718,122 @@ def extract_opensky(
         "grid_id",
     ]
     target_bbox = bbox or BBOX_WIDE
-    params = {
-        "lamin": target_bbox[1],
-        "lomax": target_bbox[3],
-        "lamax": target_bbox[2],
-        "lomin": target_bbox[0],
-    }
+    lamin = target_bbox[1]
+    lomin = target_bbox[0]
+    lamax = target_bbox[3]
+    lomax = target_bbox[2]
+    bbox_rest = (lamin, lomin, lamax, lomax)
+    bbox_cli = _bbox_client_order(lamin, lomin, lamax, lomax)
+    now = _now_utc()
+    window_start = now - timedelta(hours=hours)
+    basic_creds = _get_opensky_basic()
+    prefer_client = bool(OpenSkyApi and basic_creds[0] and basic_creds[1])
+    raw_path = RAW_DIR / f"opensky_{_timestamp()}.json"
     try:
-        data = _fetch_opensky(params)
-    except requests.RequestException as exc:
-        logger.error("OpenSky fetch failed: %s", exc)
-        return pd.DataFrame(columns=empty_columns)
-    states = data.get("states") or []
-    auto_retry = AUTO_RETRY_MAX_ENABLED and bbox is None
-    if auto_retry and len(states) < THRESH_OS_MIN:
-        logger.info(
-            "OpenSky sparse (%s points); retrying once with MAX bbox.",
-            len(states),
+        state_df, meta, raw_json = _fetch_opensky_states(
+            window_start,
+            now,
+            bbox_cli,
+            bbox_rest,
+            prefer_client,
         )
-        max_params = {
-            "lamin": BBOX_MAX[1],
-            "lomax": BBOX_MAX[3],
-            "lamax": BBOX_MAX[2],
-            "lomin": BBOX_MAX[0],
+    except Exception as exc:
+        logger.error("OpenSky fetch failed: %s", exc)
+        payload = {
+            "time": int(now.timestamp()),
+            "states": [],
+            "path": "error",
+            "error": str(exc),
         }
+        _write_json(raw_path, payload)
+        return pd.DataFrame(columns=empty_columns)
+    bbox_label = "CUSTOM"
+    if bbox is None:
+        bbox_label = "WIDE"
+    raw_content = raw_json
+    logger.info(
+        "OpenSky (%s) states=%s for %s bbox",
+        meta.get("path", "rest"),
+        meta.get("count", 0),
+        bbox_label,
+    )
+    auto_retry = AUTO_RETRY_MAX_ENABLED and bbox is None
+    if auto_retry and (
+        meta.get("count", 0) < THRESH_OS_MIN or state_df.empty
+    ):
+        logger.info(
+            "OpenSky sparse (%s); retrying once with MAX bbox.",
+            meta.get("count", 0),
+        )
+        max_bbox_rest = (
+            BBOX_MAX[1],
+            BBOX_MAX[0],
+            BBOX_MAX[3],
+            BBOX_MAX[2],
+        )
+        max_bbox_cli = _bbox_client_order(*max_bbox_rest)
         try:
-            data_max = _fetch_opensky(max_params)
-        except requests.RequestException as exc:
+            state_df, meta, raw_json = _fetch_opensky_states(
+                window_start,
+                now,
+                max_bbox_cli,
+                max_bbox_rest,
+                prefer_client,
+            )
+        except Exception as exc:
             logger.error("OpenSky MAX retry failed: %s", exc)
         else:
-            data = data_max
-            states = data_max.get("states") or []
-    raw_path = RAW_DIR / f"opensky_{_timestamp()}.json"
-    _write_json(raw_path, data)
-    if not states:
+            raw_content = raw_json
+            logger.info(
+                "OpenSky (%s) states=%s for MAX bbox",
+                meta.get("path", "rest"),
+                meta.get("count", 0),
+            )
+    _atomic_write_bytes(raw_path, raw_content.encode("utf-8"))
+    if state_df.empty:
         return pd.DataFrame(columns=empty_columns)
-    window_start = _now_utc() - timedelta(hours=hours)
     records: list[dict[str, Any]] = []
-    for entry in states:
-        if not isinstance(entry, list) or len(entry) < 17:
+    for row in state_df.itertuples(index=False):
+        last_contact = getattr(row, "last_contact", None)
+        if pd.isna(last_contact):
             continue
-        lon = _parse_float(entry[5])
-        lat = _parse_float(entry[6])
-        last_contact = entry[4]
-        if last_contact is None:
+        try:
+            ts_value = float(last_contact)
+        except (TypeError, ValueError):
             continue
-        dt = datetime.fromtimestamp(last_contact, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ts_value, tz=timezone.utc)
         if dt < window_start:
             continue
+        lat = _parse_float(getattr(row, "latitude", None))
+        lon = _parse_float(getattr(row, "longitude", None))
+        if lat is None or lon is None:
+            continue
         grid_id = latlon_to_grid(lat, lon)
+        icao24_raw = getattr(row, "icao24", "")
+        if pd.isna(icao24_raw):
+            icao24_raw = ""
+        icao24 = str(icao24_raw).strip().lower()
+        callsign_raw = getattr(row, "callsign", "")
+        if pd.isna(callsign_raw):
+            callsign_raw = ""
+        callsign = str(callsign_raw).strip()
+        origin = getattr(row, "origin_country", "")
+        if pd.isna(origin):
+            origin = ""
+        velocity = _parse_float(getattr(row, "velocity", None))
+        heading = _parse_float(getattr(row, "true_track", None))
         record = {
             "dt": dt,
             "lat": lat,
             "lon": lon,
             "source": "OpenSky",
-            "raw_text": f"icao24={entry[0]} callsign={entry[1]}",
-            "country": entry[2],
+            "raw_text": f"icao24={icao24} callsign={callsign}",
+            "country": origin,
             "grid_id": grid_id or "RNaNCNaN",
-            "icao24": entry[0],
-            "callsign": (entry[1] or "").strip(),
-            "velocity": _parse_float(entry[9]),
-            "heading": _parse_float(entry[10]),
+            "icao24": icao24,
+            "callsign": callsign,
+            "velocity": velocity,
+            "heading": heading,
         }
         records.append(record)
     if not records:
