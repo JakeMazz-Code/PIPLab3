@@ -1,7 +1,8 @@
-"""Lightweight smoke checks for Streamlit helpers."""
+"""Lightweight smoke checks for Streamlit monitor helpers."""
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -11,43 +12,57 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import _filter_window, _prepare_heatmap, _watch_cells  # noqa: E402
-
-
-def _load_latest() -> pd.DataFrame:
-    enriched_dir = ROOT / "data" / "enriched"
-    candidates = sorted(enriched_dir.glob("*.parquet"))
-    if not candidates:
-        return pd.DataFrame()
-    return pd.read_parquet(candidates[-1])
-
 
 def main() -> None:
-    app_path = ROOT / "app.py"
-    app_text = app_path.read_text(encoding="utf-8")
-    if "Window:" not in app_text:
-        raise SystemExit("Window header text missing")
-    df = _load_latest()
-    sub = _filter_window(df, 24)
-    _ = _prepare_heatmap(sub)
-    _ = _watch_cells(sub, cutoff=0.35, only_mnd=False, top_k=5)
-    risk_path = ROOT / "data" / "enriched" / "daily_grid_risk.csv"
-    if risk_path.exists():
-        distinct = 0
-        try:
-            risk_df = pd.read_csv(risk_path)
-            if "risk_score" in risk_df.columns:
-                risk_series = pd.to_numeric(
-                    risk_df["risk_score"], errors="coerce"
-                ).dropna()
-                distinct = int(risk_series.nunique())
-        except Exception as exc:
-            print(f"daily_grid_risk.csv read failed: {exc}")
-        else:
-            print(
-                "daily_grid_risk distinct risk_score="
-                f"{distinct}"
-            )
+    app_mod = importlib.import_module("app")
+    print("app import OK")
+    snapshot_df, _ = app_mod._load_latest_enriched()
+    snapshot_risk, _ = app_mod._load_snapshot_risk()
+    history_days = app_mod._list_history_days()
+    _ = app_mod._load_history_enriched(1)
+    _ = app_mod._load_history_risk(1)
+    synthetic = pd.DataFrame(
+        {
+            "dt": pd.to_datetime(["2025-01-01T00:00:00Z"]),
+            "lat": [23.5],
+            "lon": [121.0],
+            "source": ["MND"],
+            "grid_id": ["R235C602"],
+            "severity_0_5": [2.0],
+            "risk_score": [0.4],
+            "actors": [["synthetic"]],
+            "corroborations": ["OS_ANOM:1.2"],
+        }
+    )
+    df_os, df_mnd = app_mod._split_sources(synthetic)
+    risk_sample = pd.DataFrame(
+        {
+            "grid_id": ["R235C602"],
+            "risk_score": [0.6],
+            "lat": [23.5],
+            "lon": [121.0],
+        }
+    )
+    if app_mod.pdk is not None:
+        layers, fallback, _ = app_mod._build_map_layers(
+            df_os,
+            df_mnd,
+            risk_sample,
+            show_hex=False,
+            show_os=True,
+            show_mnd=True,
+            starred=[],
+            selected_grid=None,
+        )
+        print(
+            f"map layers={len(layers)} fallback_points={len(fallback)}"
+        )
+    blank_df = pd.DataFrame()
+    _ = app_mod._watch_cells(blank_df, cutoff=0.35, only_mnd=True, top_k=5)
+    print(
+        f"snapshot_rows={len(snapshot_df)} risk_rows={len(snapshot_risk)} "
+        f"history_days={len(history_days)}"
+    )
     print("ui_smoke passed")
 
 
