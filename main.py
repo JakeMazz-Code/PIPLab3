@@ -47,6 +47,13 @@ GRID_STEP = 0.5
 THRESH_OS_MIN = 50  # retry with MAX when points are extremely sparse
 _AUTO_RETRY_MAX_RAW = os.getenv("AUTO_RETRY_MAX", "false").lower()
 AUTO_RETRY_MAX_ENABLED = _AUTO_RETRY_MAX_RAW in {"1", "true", "t", "yes", "y"}
+_MAX_MND_ENRICH_RAW = os.getenv("MAX_MND_ENRICH", "0").strip()
+try:
+    MAX_MND_ENRICH = int(_MAX_MND_ENRICH_RAW or "0")
+except ValueError:
+    MAX_MND_ENRICH = 0
+if MAX_MND_ENRICH < 0:
+    MAX_MND_ENRICH = 0
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 MND_LIST_URL = "https://www.mnd.gov.tw/PublishTable.aspx"
 MND_PARAMS = {
@@ -880,6 +887,12 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     metrics["merged_rows"] = len(merged)
     grid_density, hour_density = _prepare_validation(os_df)
     mnd_df = merged[merged["source"] == "MND"].copy()
+    if MAX_MND_ENRICH > 0 and len(mnd_df) > MAX_MND_ENRICH:
+        logger.info(
+            "Limiting MND incidents to %s via MAX_MND_ENRICH",
+            MAX_MND_ENRICH,
+        )
+        mnd_df = mnd_df.head(MAX_MND_ENRICH)
     mnd_df = _apply_validation(mnd_df, grid_density, hour_density, metrics)
     reset_llm_metrics()
     logger.info("Enriching %s incidents via DeepSeek", len(mnd_df))
