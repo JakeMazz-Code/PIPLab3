@@ -1283,9 +1283,8 @@ def render_history_tab(
 ) -> None:
     entries = manifest.get("days", [])
     available_days = len(entries)
-    available = max(available_days, 0)
-    if available == 0:
-        st.info("No history partitions yet.")
+    if available_days == 0:
+        st.info("No history available. Run backfill.")
         return
     date_options = [entry["date"] for entry in entries]
     selected_key = "history_selected_date"
@@ -1297,8 +1296,8 @@ def render_history_tab(
 
     slider_key = "history_playback_days"
     lookback_min = 1
-    lookback_max = min(30, max(available, 1))
-    default = min(max(7, lookback_min), lookback_max)
+    lookback_max = max(lookback_min, available_days)
+    default = min(7, lookback_max)
     st.session_state.setdefault(slider_key, default)
     current = st.session_state[slider_key]
     current = max(lookback_min, min(current, lookback_max))
@@ -1308,7 +1307,7 @@ def render_history_tab(
         "Playback range (days)",
         min_value=lookback_min,
         max_value=lookback_max,
-        value=st.session_state[slider_key],
+        value=current,
         key=slider_key,
     )
 
