@@ -32,6 +32,184 @@ GRID_STEP = 0.5
 OS_ANOM_PATTERN = re.compile(r"OS_ANOM:([-+]?\d+(?:\.\d+)?)")
 MAX_TABLE_ROWS = 1000
 
+MAP_LATITUDE = 23.5
+MAP_LONGITUDE = 121.0
+MAP_ZOOM = 5.0
+MAP_HEIGHT = 520
+
+
+@st.cache_data(ttl=60)
+def _load_latest_enriched_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    _ = mtime
+    try:
+        return pd.read_parquet(path_str)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def _load_daily_risk_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    _ = mtime
+    try:
+        return pd.read_csv(path_str)
+    except Exception:
+        return pd.DataFrame()
+
+def _load_latest_enriched() -> pd.DataFrame:
+    dir_mtime = _path_mtime(ENRICHED_DIR)
+    parquet_path = _latest_parquet(ENRICHED_DIR, dir_mtime)
+    if parquet_path is None:
+        return pd.DataFrame()
+    try:
+        parquet_mtime = parquet_path.stat().st_mtime
+    except OSError:
+        parquet_mtime = time.time()
+    df = _load_latest_enriched_cached(str(parquet_path), parquet_mtime)
+    if df.empty:
+        return df
+    working = df.copy()
+    working["dt"] = pd.to_datetime(
+        working.get("dt"), utc=True, errors="coerce"
+    )
+    working = working.dropna(subset=["dt"])
+    source_series = working.get("source")
+    if source_series is None:
+        working["source"] = ""
+    working["source"] = working["source"].astype(str).str.upper().str.strip()
+    working.loc[working["source"].eq("OPENSKY"), "source"] = "OS"
+    working.loc[working["source"].eq("OPEN SKY"), "source"] = "OS"
+    for column in ("lat", "lon"):
+        if column not in working.columns:
+            working[column] = None
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+    if "grid_id" not in working.columns:
+        working["grid_id"] = None
+    return working
+
+
+def _load_daily_risk() -> pd.DataFrame:
+    risk_path = ENRICHED_DIR / "daily_grid_risk.csv"
+    if not risk_path.exists():
+        return pd.DataFrame()
+    try:
+        risk_mtime = risk_path.stat().st_mtime
+    except OSError:
+        risk_mtime = time.time()
+    df = _load_daily_risk_cached(str(risk_path), risk_mtime)
+    if df.empty:
+        return df
+    working = df.copy()
+    working["grid_id"] = working.get("grid_id", "").astype(str).str.strip()
+    working["risk_score"] = pd.to_numeric(
+        working.get("risk_score"), errors="coerce"
+    ).clip(lower=0.0, upper=1.0)
+    working = working.dropna(subset=["grid_id", "risk_score"])
+    if "day" in working.columns:
+        working["day"] = pd.to_datetime(
+            working["day"], utc=True, errors="coerce"
+        )
+    elif "dt" in working.columns:
+        working["day"] = pd.to_datetime(
+            working["dt"], utc=True, errors="coerce"
+        )
+    else:
+        working["day"] = pd.NaT
+    for column in ("lat", "lon"):
+        if column not in working.columns:
+            working[column] = None
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+    needs_coords = working["lat"].isna() | working["lon"].isna()
+    if needs_coords.any():
+        coords = working.loc[needs_coords, "grid_id"].apply(_grid_to_centroid)
+        working.loc[needs_coords, "lat"] = coords.apply(
+            lambda value: value[0] if value else float("nan")
+        )
+        working.loc[needs_coords, "lon"] = coords.apply(
+            lambda value: value[1] if value else float("nan")
+        )
+    working = working.dropna(subset=["lat", "lon"])
+    return working
+
+
+def _map_view_state() -> Any:
+    if pdk is None:
+        return None
+    return pdk.ViewState(
+        latitude=MAP_LATITUDE, longitude=MAP_LONGITUDE, zoom=MAP_ZOOM
+    )
+
+
+def _split_sources(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    empty = df.iloc[0:0] if not df.empty else pd.DataFrame()
+    if df.empty or "source" not in df.columns:
+        return empty.copy(), empty.copy()
+    working = df.copy()
+    working["source"] = working["source"].astype(str).str.upper().str.strip()
+    os_mask = working["source"].isin({"OS", "OPENSKY"})
+    mnd_mask = working["source"].eq("MND")
+    df_os = working[os_mask].copy()
+    df_mnd = working[mnd_mask].copy()
+    if not df_os.empty:
+        df_os["lat"] = pd.to_numeric(df_os.get("lat"), errors="coerce")
+        df_os["lon"] = pd.to_numeric(df_os.get("lon"), errors="coerce")
+        df_os = df_os.dropna(subset=["lat", "lon"])
+        df_os["velocity"] = pd.to_numeric(
+            df_os.get("velocity"), errors="coerce"
+        ).fillna(0.0)
+        velocity = df_os["velocity"].clip(lower=0.0).fillna(0.0)
+        df_os["radius"] = (velocity + 1.0) * 2000.0
+    if not df_mnd.empty:
+        df_mnd["lat"] = pd.to_numeric(df_mnd.get("lat"), errors="coerce")
+        df_mnd["lon"] = pd.to_numeric(df_mnd.get("lon"), errors="coerce")
+        need_coords = df_mnd["lat"].isna() | df_mnd["lon"].isna()
+        if need_coords.any():
+            coords = df_mnd.loc[need_coords, "grid_id"].apply(
+                _grid_to_centroid
+            )
+            df_mnd.loc[need_coords, "lat"] = coords.apply(
+                lambda value: value[0] if value else float("nan")
+            )
+            df_mnd.loc[need_coords, "lon"] = coords.apply(
+                lambda value: value[1] if value else float("nan")
+            )
+        df_mnd = df_mnd.dropna(subset=["lat", "lon"])
+        df_mnd["radius"] = 16000.0
+    return df_os, df_mnd
+
+
+def _format_dt_labels(series: pd.Series) -> pd.Series:
+    dt_series = pd.to_datetime(series, utc=True, errors="coerce")
+    formatted = dt_series.dt.strftime("%Y-%m-%d %H:%MZ")
+    return formatted.where(dt_series.notna(), "")
+
+
+def _filter_risk_window(
+    risk_df: pd.DataFrame, start: datetime, end: datetime
+) -> pd.DataFrame:
+    if risk_df.empty:
+        return risk_df
+    working = risk_df.copy()
+    working["day"] = pd.to_datetime(
+        working.get("day"), utc=True, errors="coerce"
+    )
+    working = working.dropna(subset=["day"])
+    if working.empty:
+        return working
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
+    start_floor = start_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    mask = (working["day"] >= start_floor) & (working["day"] <= end_utc)
+    filtered = working.loc[mask].copy()
+    if filtered.empty:
+        latest_day = working["day"].max()
+        if pd.isna(latest_day):
+            return filtered
+        filtered = working[working["day"].eq(latest_day)].copy()
+    filtered = filtered.sort_values("risk_score", ascending=False)
+    filtered = filtered.drop_duplicates(subset=["grid_id"], keep="first")
+    return filtered.reset_index(drop=True)
+
+
 
 def _path_mtime(path: Path) -> float:
     """Return a safe modification time for cache keys."""
@@ -165,8 +343,10 @@ def _watch_cells(
     if df.empty:
         return df.iloc[0:0]
     scope = df.copy()
-    if only_mnd and "source" in scope.columns:
-        scope = scope[scope["source"].astype(str) == "MND"]
+    if "source" in scope.columns:
+        scope = scope[scope["source"].astype(str).str.upper() == "MND"]
+    if scope.empty:
+        return scope.iloc[0:0]
     scope["risk_score"] = pd.to_numeric(
         scope.get("risk_score"),
         errors="coerce",
@@ -185,13 +365,11 @@ def _watch_cells(
     filtered = grouped[grouped["mean_risk"] >= cutoff]
     if filtered.empty:
         filtered = grouped.sort_values(
-            "mean_risk",
-            ascending=False,
+            "mean_risk", ascending=False
         ).head(top_k)
     else:
         filtered = filtered.sort_values(
-            "mean_risk",
-            ascending=False,
+            "mean_risk", ascending=False
         ).head(top_k)
     if filtered.empty:
         return grouped.iloc[0:0]
@@ -207,10 +385,12 @@ def _render_window_header(df: pd.DataFrame, hours: int) -> None:
     """Render the UTC window bounds and counts for the current view."""
 
     total = len(df)
+    os_count = 0
+    mnd_count = 0
     if "source" in df.columns:
-        mnd_count = int(df["source"].astype(str).eq("MND").sum())
-    else:
-        mnd_count = 0
+        source_series = df["source"].astype(str).str.upper().str.strip()
+        mnd_count = int(source_series.eq("MND").sum())
+        os_count = int(source_series.isin({"OS", "OPENSKY"}).sum())
 
     start_dt: datetime | None = None
     end_dt: datetime | None = None
@@ -288,18 +468,38 @@ def _sample_actors(values: Iterable[Any]) -> str:
         return ""
     return ", ".join(unique[:3])
 
+def _row_actors_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return _sample_actors(value)
+    if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+        try:
+            return _sample_actors(value)
+        except TypeError:
+            pass
+    return str(value).strip()
+
+
 
 def _filter_window(df: pd.DataFrame, hours: int) -> pd.DataFrame:
     if df.empty or "dt" not in df.columns:
         return df
-    df = df.copy()
-    df["dt"] = pd.to_datetime(df["dt"], utc=True, errors="coerce")
-    df = df.dropna(subset=["dt"])
-    latest = df["dt"].max()
-    if pd.isna(latest):
-        return df
-    window_start = latest - timedelta(hours=hours)
-    return df[df["dt"] >= window_start]
+    working = df.copy()
+    working["dt"] = pd.to_datetime(working["dt"], utc=True, errors="coerce")
+    working = working.dropna(subset=["dt"])
+    if working.empty:
+        return working
+    window_end = datetime.now(timezone.utc)
+    window_start = window_end - timedelta(hours=hours)
+    mask = (working["dt"] >= window_start) & (working["dt"] <= window_end)
+    filtered = working.loc[mask]
+    if filtered.empty:
+        latest = working["dt"].max()
+        if pd.notna(latest):
+            fallback_start = latest - timedelta(hours=hours)
+            filtered = working[working["dt"] >= fallback_start]
+    return filtered
 
 
 def _apply_filters(
@@ -436,40 +636,41 @@ def compute_kpis(
 def load_artifacts(
     parquet_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
-    dir_mtime = _path_mtime(parquet_dir)
-    parquet_path = _latest_parquet(parquet_dir, dir_mtime)
-    if parquet_path is None:
-        st.error("No enriched parquet files found.")
-        return pd.DataFrame(), pd.DataFrame(), None
-    try:
-        parquet_mtime = parquet_path.stat().st_mtime
-    except OSError:
-        parquet_mtime = time.time()
-    df = _load_parquet_df(str(parquet_path), parquet_mtime)
+    df = pd.DataFrame()
+    risk_df = pd.DataFrame()
+    if parquet_dir == ENRICHED_DIR:
+        df = _load_latest_enriched()
+        risk_df = _load_daily_risk()
+    if df.empty:
+        dir_mtime = _path_mtime(parquet_dir)
+        parquet_path = _latest_parquet(parquet_dir, dir_mtime)
+        if parquet_path is None:
+            st.error("No enriched parquet files found.")
+            return pd.DataFrame(), pd.DataFrame(), None
+        try:
+            parquet_mtime = parquet_path.stat().st_mtime
+        except OSError:
+            parquet_mtime = time.time()
+        df = _load_parquet_df(str(parquet_path), parquet_mtime)
     if df.empty:
         st.error("Failed to load incidents parquet.")
         return pd.DataFrame(), pd.DataFrame(), None
-    risk_candidates = [
-        parquet_dir / "daily_grid_risk.csv",
-        Path("data/enriched/daily_grid_risk.csv"),
-    ]
-    risk_df = pd.DataFrame()
-    for candidate in risk_candidates:
-        if not candidate.exists():
-            continue
-        try:
-            risk_mtime = candidate.stat().st_mtime
-        except OSError:
-            risk_mtime = time.time()
-        risk_df = _load_csv_df(str(candidate), risk_mtime)
-        if not risk_df.empty:
-            break
-        risk_df = pd.DataFrame()
-    else:
-        st.error("daily_grid_risk.csv not found.")
+    if risk_df.empty:
+        risk_df = _load_daily_risk()
+    if risk_df.empty:
+        risk_path = parquet_dir / "daily_grid_risk.csv"
+        if risk_path.exists():
+            try:
+                risk_mtime = risk_path.stat().st_mtime
+            except OSError:
+                risk_mtime = time.time()
+            risk_df = _load_daily_risk_cached(str(risk_path), risk_mtime)
+        if risk_df.empty:
+            st.info("daily_grid_risk.csv not found.")
     if not risk_df.empty and "risk_score" in risk_df.columns:
-        risk_series = pd.to_numeric(risk_df["risk_score"], errors="coerce")
-        risk_series = risk_series.dropna()
+        risk_series = pd.to_numeric(
+            risk_df["risk_score"], errors="coerce"
+        ).dropna()
         if not risk_series.empty and risk_series.nunique() == 1:
             st.info("daily_grid_risk.csv has a flat risk score.")
     brief_path = EXAMPLES_DIR / "airops_brief_24h.md"
@@ -930,6 +1131,193 @@ def _wkey(ns: str, name: str) -> str:
     return f"{ns}__{name}"
 
 
+def _build_fallback_points(
+    df_os: pd.DataFrame,
+    df_mnd: pd.DataFrame,
+    risk_df: pd.DataFrame,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for label, frame in (("OS", df_os), ("MND", df_mnd), ("RISK", risk_df)):
+        if frame is None or frame.empty:
+            continue
+        subset = frame[["lat", "lon"]].copy()
+        subset = subset.dropna(subset=["lat", "lon"])
+        if subset.empty:
+            continue
+        subset["layer"] = label
+        frames.append(subset)
+    if not frames:
+        return pd.DataFrame(columns=["lat", "lon", "layer"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _render_incident_map(
+    df_os: pd.DataFrame,
+    df_mnd: pd.DataFrame,
+    risk_df: pd.DataFrame,
+    map_layer: str,
+    widget_ns: str,
+) -> None:
+    debug_key = _wkey(widget_ns, "debug_counts")
+    show_debug = st.checkbox(
+        "Show debug counts", value=False, key=debug_key
+    )
+    if show_debug:
+        st.caption(
+            f"OS={len(df_os)} MND={len(df_mnd)} risk={len(risk_df)}"
+        )
+
+    def _render_points(points: pd.DataFrame) -> None:
+        if points.empty:
+            st.info("No location data available for this window.")
+            return
+        if pdk is None:
+            st.map(points[["lat", "lon"]])
+            return
+        try:
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=points,
+                get_position="[lon, lat]",
+                get_radius=12000,
+                get_fill_color="[160, 160, 160, 200]",
+                pickable=False,
+            )
+            deck = pdk.Deck(
+                layers=[layer],
+                initial_view_state=_map_view_state(),
+                map_provider="carto",
+                map_style="dark",
+            )
+            st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
+        except Exception:
+            st.map(points[["lat", "lon"]])
+
+    fallback_points = _build_fallback_points(df_os, df_mnd, risk_df)
+    if pdk is None:
+        _render_points(fallback_points)
+        return
+
+    layers: list[Any] = []
+    tooltip = {"html": "{tooltip}", "style": {"color": "white"}}
+    risk_enabled = map_layer in {"Heatmap", "Hexagons"}
+    risk_data = pd.DataFrame()
+    if risk_enabled and not risk_df.empty:
+        risk_data = risk_df.copy()
+        risk_data["risk_score"] = pd.to_numeric(
+            risk_data.get("risk_score"), errors="coerce"
+        ).fillna(0.0).clip(0.0, 1.0)
+        risk_data = risk_data.dropna(subset=["lat", "lon"])
+        if not risk_data.empty:
+            if map_layer == "Heatmap":
+                layers.append(
+                    pdk.Layer(
+                        "HeatmapLayer",
+                        data=risk_data,
+                        get_position="[lon, lat]",
+                        get_weight="risk_score",
+                        radius_pixels=60,
+                    )
+                )
+            else:
+                layers.append(
+                    pdk.Layer(
+                        "HexagonLayer",
+                        data=risk_data,
+                        get_position="[lon, lat]",
+                        get_weight="risk_score",
+                        radius=20000,
+                        elevation_scale=400,
+                        extruded=True,
+                        elevation_range=[0, 3000],
+                    )
+                )
+
+    def _clean_series(frame: pd.DataFrame, column: str) -> pd.Series:
+        if column not in frame.columns:
+            return pd.Series("", index=frame.index)
+        series = frame[column]
+        if column == "actors":
+            series = series.apply(_row_actors_text)
+        return series.fillna("").astype(str).str.strip()
+
+    os_data = df_os.copy()
+    if not os_data.empty:
+        dt_labels = _format_dt_labels(os_data.get("dt"))
+        callsign = _clean_series(os_data, "callsign")
+        os_text = _clean_series(os_data, "raw_text")
+        os_data["tooltip"] = "OS<br/>dt: " + dt_labels
+        mask_callsign = callsign.ne("")
+        os_data.loc[mask_callsign, "tooltip"] = (
+            os_data.loc[mask_callsign, "tooltip"]
+            + "<br/>"
+            + callsign[mask_callsign]
+        )
+        mask_text = os_text.ne("")
+        os_data.loc[mask_text, "tooltip"] = (
+            os_data.loc[mask_text, "tooltip"]
+            + "<br/>"
+            + os_text[mask_text]
+        )
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=os_data,
+                get_position="[lon, lat]",
+                get_radius="radius",
+                get_fill_color="[30, 144, 255, 140]",
+                pickable=True,
+                auto_highlight=True,
+            )
+        )
+
+    mnd_data = df_mnd.copy()
+    if not mnd_data.empty:
+        dt_labels = _format_dt_labels(mnd_data.get("dt"))
+        summary = _clean_series(mnd_data, "summary_one_line")
+        actors = _clean_series(mnd_data, "actors")
+        raw_text = _clean_series(mnd_data, "raw_text")
+        mnd_data["tooltip"] = "MND<br/>dt: " + dt_labels
+        for extra in (summary, actors, raw_text):
+            mask = extra.ne("")
+            mnd_data.loc[mask, "tooltip"] = (
+                mnd_data.loc[mask, "tooltip"]
+                + "<br/>"
+                + extra[mask]
+            )
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=mnd_data,
+                get_position="[lon, lat]",
+                get_radius="radius",
+                get_fill_color="[255, 140, 0, 220]",
+                pickable=True,
+                auto_highlight=True,
+            )
+        )
+
+    fallback_base = _build_fallback_points(
+        df_os, df_mnd, risk_data if not risk_data.empty else risk_df
+    )
+    if not layers:
+        _render_points(fallback_base)
+        return
+    try:
+        deck = pdk.Deck(
+            layers=layers,
+            initial_view_state=_map_view_state(),
+            map_provider="carto",
+            map_style="dark",
+            tooltip=tooltip,
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=MAP_HEIGHT)
+    except Exception:
+        _render_points(fallback_base)
+
+
+
+
 def render_anomaly_chart(df: pd.DataFrame) -> None:
     if df.empty or "validation_score" not in df.columns:
         st.info("No validation scores available for chart.")
@@ -971,24 +1359,28 @@ def render_analyst_tab(
     only_mnd: bool,
     map_layer: str,
     brief_text: str | None,
+    risk_df: pd.DataFrame,
     widget_ns: str = "analyst",
 ) -> None:
-    st.subheader("Heatmap")
-    render_heatmap(window_df, map_layer)
+    window_end = datetime.now(timezone.utc)
+    window_start = window_end - timedelta(hours=hours)
+    df_os, df_mnd = _split_sources(source_df)
+    risk_window = _filter_risk_window(risk_df, window_start, window_end)
+    st.subheader("Map")
+    _render_incident_map(df_os, df_mnd, risk_window, map_layer, widget_ns)
     st.subheader("Watch cells")
-    if source_df.empty:
-        watch_df = pd.DataFrame()
-    else:
+    watch_df = pd.DataFrame()
+    if not source_df.empty:
         watch_df = _watch_cells(source_df, cutoff, only_mnd, top_k=5)
     if watch_df.empty:
-        st.info("No data in window.")
+        st.info("No MND grids in the selected window.")
     else:
-        st.dataframe(watch_df)
+        st.dataframe(watch_df.reset_index(drop=True))
     st.subheader("MND incidents")
     if source_df.empty or "source" not in source_df.columns:
         mnd_table = pd.DataFrame()
     else:
-        mnd_mask = source_df["source"].astype(str) == "MND"
+        mnd_mask = source_df["source"].astype(str).str.upper() == "MND"
         mnd_table = source_df[mnd_mask].copy()
     focus_options: list[str] = []
     if not mnd_table.empty and "grid_id" in mnd_table.columns:
@@ -1236,6 +1628,8 @@ def _build_history_day_payload(
         "mnd_count": mnd_count,
         "anomalies": anomalies,
         "window_hours": hours,
+        "map_df": window_df,
+        "map_hours": hours,
     }
 
 
@@ -1283,9 +1677,10 @@ def _render_history_day_header(
     day_data: dict[str, Any],
 ) -> None:
     """Render window header and KPI cards for a history day."""
-    hours = int(day_data.get("window_hours", 24))
+    hours = int(day_data.get("map_hours", day_data.get("window_hours", 24)))
+    map_df = day_data.get("map_df", day_data.get("display_df", pd.DataFrame()))
     with placeholder.container():
-        _render_window_header(day_data["display_df"], hours)
+        _render_window_header(map_df, hours)
         card_cols = st.columns(3)
         card_cols[0].metric(
             "Total points", f"{day_data['total_points']:,}"
@@ -1300,22 +1695,31 @@ def _render_history_day_header(
 def _render_history_day_map(
     placeholder: Any,
     day_data: dict[str, Any],
-    cutoff: float,
-    only_mnd: bool,
     map_layer: str,
+    risk_df: pd.DataFrame,
+    widget_ns: str,
 ) -> None:
     """Render analyst map for a history day."""
-    hours = int(day_data.get("window_hours", 24))
+    map_df = day_data.get("map_df", day_data.get("window_df", pd.DataFrame()))
+    hours = int(day_data.get("map_hours", day_data.get("window_hours", 24)))
     with placeholder.container():
-        render_analyst_tab(
-            day_data["window_df"],
-            day_data["display_df"],
-            hours,
-            cutoff,
-            only_mnd,
-            map_layer,
-            None,
-            widget_ns="history",
+        df_os, df_mnd = _split_sources(map_df)
+        window_end = datetime.now(timezone.utc)
+        window_start = window_end - timedelta(hours=hours)
+        if not map_df.empty and "dt" in map_df.columns:
+            dt_series = pd.to_datetime(
+                map_df["dt"], utc=True, errors="coerce"
+            ).dropna()
+            if not dt_series.empty:
+                window_end = dt_series.max().to_pydatetime().astimezone(
+                    timezone.utc
+                )
+                window_start = dt_series.min().to_pydatetime().astimezone(
+                    timezone.utc
+                )
+        risk_window = _filter_risk_window(risk_df, window_start, window_end)
+        _render_incident_map(
+            df_os, df_mnd, risk_window, map_layer, widget_ns
         )
 
 
@@ -1324,18 +1728,18 @@ def _render_history_day_view(
     header_placeholder: Any,
     map_placeholder: Any,
     day_data: dict[str, Any],
-    cutoff: float,
-    only_mnd: bool,
     map_layer: str,
+    risk_df: pd.DataFrame,
+    widget_ns: str,
 ) -> None:
     """Render header metrics and map for a history day."""
     _render_history_day_header(header_placeholder, day_data)
     _render_history_day_map(
         map_placeholder,
         day_data,
-        cutoff,
-        only_mnd,
         map_layer,
+        risk_df,
+        widget_ns,
     )
 
 
@@ -1369,6 +1773,7 @@ def render_history_tab(
     cutoff: float,
     only_mnd: bool,
     map_layer: str,
+    risk_df: pd.DataFrame,
 ) -> None:
     entries = manifest.get("days", [])
     available_days = len(entries)
@@ -1376,14 +1781,14 @@ def render_history_tab(
         st.info("No history available. Run backfill.")
         return
     date_options = [entry["date"] for entry in entries]
-    selected_key = "history_selected_date"
+    selected_key = _wkey("history", "date")
     if (
         selected_key not in st.session_state
         or st.session_state[selected_key] not in date_options
     ):
         st.session_state[selected_key] = date_options[-1]
 
-    slider_key = "history_playback_days"
+    slider_key = _wkey("history", "days")
     max_value = max(1, available_days)
     default_value = min(7, max_value)
     slider_value = st.session_state.get(slider_key, default_value)
@@ -1397,7 +1802,7 @@ def render_history_tab(
         key=slider_key,
     )
 
-    snapshot_key = "history_show_snapshot"
+    snapshot_key = _wkey("history", "snapshot")
     st.session_state.setdefault(snapshot_key, True)
     show_snapshot = st.checkbox(
         "Show 24h snapshot",
@@ -1439,11 +1844,18 @@ def render_history_tab(
                         ),
                     }
                 )
+        history_df = day_data.get("history_df", pd.DataFrame())
+        os_count = 0
+        if not history_df.empty and "source" in history_df.columns:
+            os_mask = history_df["source"].astype(str).str.upper().isin(\
+            {"OS", "OPENSKY"}\
+        )
+            os_count = int(os_mask.sum())
         trend_rows.append(
             {
                 "date": day_data["date"],
-                "points": day_data["total_points"],
-                "anomalies": day_data["anomalies"],
+                "os_count": os_count,
+                "os_anom_mean": float(day_data.get("os_mean", float("nan"))),
             }
         )
 
@@ -1465,6 +1877,26 @@ def render_history_tab(
         st.warning("History entry not found.")
         return
 
+    map_frames: list[pd.DataFrame] = []
+    if show_snapshot:
+        if "history_df" in selected_day:
+            map_frames.append(selected_day["history_df"])
+        map_hours = 24
+    else:
+        for playback_entry in playback_entries[-lookback:]:
+            cached = day_cache.get(playback_entry["date"])
+            if cached is None:
+                continue
+            map_frames.append(cached.get("history_df", pd.DataFrame()))
+        map_hours = max(24, lookback * 24) if map_frames else 24
+    if map_frames:
+        map_df = pd.concat(map_frames, ignore_index=True)
+    else:
+        map_df = pd.DataFrame()
+    selected_for_view = selected_day.copy()
+    selected_for_view["map_df"] = map_df
+    selected_for_view["map_hours"] = map_hours
+
     header_placeholder = st.empty()
     summary_df = (
         pd.DataFrame(summary_rows)
@@ -1473,26 +1905,35 @@ def render_history_tab(
             columns=["date", "points", "os_anom_mean"]
         )
     )
-    _render_history_day_header(header_placeholder, selected_day)
+    _render_history_day_header(header_placeholder, selected_for_view)
     st.subheader("History summary")
     _render_history_summary(summary_df)
     if trend_rows:
         trend_df_plot = pd.DataFrame(trend_rows).set_index("date")
-        st.subheader(f"Playback summary (last {lookback} days)")
-        st.line_chart(trend_df_plot)
+        available_cols = [
+            col
+            for col in ("os_count", "os_anom_mean")
+            if col in trend_df_plot.columns
+        ]
+        if len(trend_df_plot.index.unique()) >= 2 and available_cols:
+            st.subheader(f"OS activity vs OS_ANOM (last {lookback} days)")
+            st.line_chart(trend_df_plot[available_cols])
 
     map_placeholder = st.empty()
     _render_history_day_map(
         map_placeholder,
-        selected_day,
-        cutoff,
-        only_mnd,
+        selected_for_view,
         map_layer,
+        risk_df,
+        widget_ns="history_map",
     )
     status_placeholder = st.empty()
     snapshot_placeholder = st.empty()
     trend_lookup = {
-        row["date"]: (row["points"], row["anomalies"])
+        row.get("date"): (
+            row.get("os_count", 0),
+            row.get("os_anom_mean", float("nan")),
+        )
         for row in trend_rows
     }
     playback_dates = [
@@ -1501,7 +1942,7 @@ def render_history_tab(
         if entry["date"] in day_cache
     ]
     if len(playback_dates) > 1:
-        if st.button("Play timelapse", key="history_play_button"):
+        if st.button("Play timelapse", key=_wkey("history", "play")):
             snapshot_placeholder.empty()
             for date in playback_dates:
                 day_data = day_cache.get(date)
@@ -1511,14 +1952,21 @@ def render_history_tab(
                     header_placeholder,
                     map_placeholder,
                     day_data,
-                    cutoff,
-                    only_mnd,
                     map_layer,
+                    risk_df,
+                    widget_ns=_wkey("history", f"tl_{date}"),
                 )
-                points, anomalies = trend_lookup.get(date, (0, 0))
-                status_placeholder.info(
-                    f"{date}: {points:,} points, {anomalies} anomalies"
+                os_count, os_mean = trend_lookup.get(
+                    date, (0, float("nan"))
                 )
+                if pd.notna(os_mean):
+                    status_placeholder.info(
+                        f"{date}: OS={os_count:,} OS_ANOM mean={os_mean:.2f}"
+                    )
+                else:
+                    status_placeholder.info(
+                        f"{date}: OS={os_count:,}"
+                    )
                 st.session_state[selected_key] = date
             final_date = playback_dates[-1]
             st.session_state[selected_key] = final_date
@@ -1533,15 +1981,20 @@ def render_history_tab(
                         st.subheader("Latest 24h snapshot")
                         snap_header = st.empty()
                         snap_map = st.empty()
+                        snapshot_view = snapshot_data.copy()
+                        snapshot_view["map_df"] = snapshot_data.get(
+                            "history_df", pd.DataFrame()
+                        )
+                        snapshot_view["map_hours"] = 24
                         _render_history_day_header(
-                            snap_header, snapshot_data
+                            snap_header, snapshot_view
                         )
                         _render_history_day_map(
                             snap_map,
-                            snapshot_data,
-                            cutoff,
-                            only_mnd,
+                            snapshot_view,
                             map_layer,
+                            risk_df,
+                            widget_ns="history_snapshot",
                         )
                 else:
                     snapshot_placeholder.info(
@@ -1705,7 +2158,8 @@ def main() -> None:
             cutoff,
             only_mnd,
             map_layer,
-            brief_text
+            brief_text,
+            risk_df,
         )
     with arcade_tab:
         _render_window_header(arcade_window_df, hours)
@@ -1714,7 +2168,9 @@ def main() -> None:
         )
     with history_tab:
         _render_window_header(window_df, hours)
-        render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
+        render_history_tab(\
+            manifest, hours, cutoff, only_mnd, map_layer, risk_df\
+        )
     sidebar.markdown("---")
     dir_mtime = _path_mtime(ENRICHED_DIR)
     latest_parquet = _latest_parquet(ENRICHED_DIR, dir_mtime)
