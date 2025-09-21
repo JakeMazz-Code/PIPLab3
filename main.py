@@ -60,6 +60,20 @@ except ValueError:
     MAX_MND_ENRICH = 0
 if MAX_MND_ENRICH < 0:
     MAX_MND_ENRICH = 0
+_MND_MAX_PAGES_RAW = os.getenv("MND_MAX_PAGES", "1").strip()
+try:
+    MND_MAX_PAGES = int(_MND_MAX_PAGES_RAW or "1")
+except ValueError:
+    MND_MAX_PAGES = 1
+if MND_MAX_PAGES < 1:
+    MND_MAX_PAGES = 1
+MND_SCRAPE_STATS: dict[str, int] = {
+    "pages": 0,
+    "raw_cards": 0,
+    "parsed_rows": 0,
+    "after_dedupe": 0,
+}
+
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 MND_LIST_URL = "https://www.mnd.gov.tw/PublishTable.aspx"
 MND_PARAMS = {
@@ -850,11 +864,15 @@ def extract_opensky(
     stop=stop_after_attempt(3),
     reraise=True,
 )
-def _fetch_mnd_html() -> str:
+def _fetch_mnd_html(page: int = 1) -> str:
     """Retrieve the MND bulletin list HTML."""
+
+    params = dict(MND_PARAMS)
+    if page > 1:
+        params["Page"] = page
     response = requests.get(
         MND_LIST_URL,
-        params=MND_PARAMS,
+        params=params,
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -886,34 +904,77 @@ def _parse_mnd_table(html: str) -> list[dict[str, Any]]:
 
 def scrape_mnd() -> list[dict]:
     """Scrape Taiwan MND daily PLA activities bulletins."""
-    try:
-        html = _fetch_mnd_html()
-    except requests.RequestException as exc:
-        logger.error("MND fetch failed: %s", exc)
-        return []
-    raw_path = RAW_DIR / f"mnd_{_timestamp()}.html"
-    _write_text(raw_path, html)
-    rows = _parse_mnd_table(html)
+
+    global MND_SCRAPE_STATS
+    MND_SCRAPE_STATS = {
+        "pages": 0,
+        "raw_cards": 0,
+        "parsed_rows": 0,
+        "after_dedupe": 0,
+    }
+    timestamp = _timestamp()
     results: list[dict[str, Any]] = []
-    for row in rows:
-        dt_value = row.get("dt")
-        if dt_value is None:
-            continue
-        title = row["title"]
-        results.append({
-            "dt": dt_value,
-            "lat": None,
-            "lon": None,
-            "source": "MND",
-            "raw_text": title,
-            "country": "CN",
-            "grid_id": "RNaNCNaN",
-            "where_guess": None,
-            "extra": {
-                "raw_html": row["raw_html"],
-            },
-        })
+    seen_keys: set[tuple[str, str]] = set()
+    raw_cards = 0
+    parsed_rows = 0
+    pages_fetched = 0
+    for page in range(1, MND_MAX_PAGES + 1):
+        try:
+            html = _fetch_mnd_html(page=page)
+        except requests.RequestException as exc:
+            logger.error("MND fetch failed on page %s: %s", page, exc)
+            if page == 1:
+                return []
+            break
+        pages_fetched += 1
+        suffix = "" if page == 1 else f"_p{page}"
+        raw_path = RAW_DIR / f"mnd_{timestamp}{suffix}.html"
+        _write_text(raw_path, html)
+        rows = _parse_mnd_table(html)
+        raw_cards += len(rows)
+        if not rows:
+            break
+        before_count = len(results)
+        for row in rows:
+            dt_value = row.get("dt")
+            if dt_value is None:
+                continue
+            parsed_rows += 1
+            title = row["title"]
+            key = (dt_value.isoformat(), title)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            results.append(
+                {
+                    "dt": dt_value,
+                    "lat": None,
+                    "lon": None,
+                    "source": "MND",
+                    "raw_text": title,
+                    "country": "CN",
+                    "grid_id": "RNaNCNaN",
+                    "where_guess": None,
+                    "extra": {"raw_html": row["raw_html"]},
+                }
+            )
+        if len(results) == before_count:
+            break
+    MND_SCRAPE_STATS = {
+        "pages": pages_fetched,
+        "raw_cards": raw_cards,
+        "parsed_rows": parsed_rows,
+        "after_dedupe": len(results),
+    }
+    logger.info(
+        "MND scrape: pages=%s raw_cards=%s parsed_rows=%s after_dedupe=%s",
+        pages_fetched,
+        raw_cards,
+        parsed_rows,
+        len(results),
+    )
     return results
+
 
 
 def clean_merge(
@@ -1287,13 +1348,30 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
     metrics["merged_rows"] = len(merged)
     grid_density, hour_density = _prepare_validation(os_df)
     mnd_df = merged[merged["source"] == "MND"].copy()
-    if MAX_MND_ENRICH > 0 and len(mnd_df) > MAX_MND_ENRICH:
+    pre_limit_len = len(mnd_df)
+    limit_applied = False
+    if MAX_MND_ENRICH > 0 and pre_limit_len > MAX_MND_ENRICH:
         logger.info(
             "Limiting MND incidents to %s via MAX_MND_ENRICH",
             MAX_MND_ENRICH,
         )
         mnd_df = mnd_df.head(MAX_MND_ENRICH)
+        limit_applied = True
+
     mnd_df = _apply_validation(mnd_df, grid_density, hour_density, metrics)
+    stats = MND_SCRAPE_STATS
+    logger.info(
+        "MND: pages=%s raw_cards=%s parsed_rows=%s after_dedupe=%s "
+        "pre_limit=%s for_llm=%s limit_applied=%s max_mnd_enrich=%s",
+        stats.get("pages", 0),
+        stats.get("raw_cards", 0),
+        stats.get("parsed_rows", 0),
+        stats.get("after_dedupe", 0),
+        pre_limit_len,
+        len(mnd_df),
+        limit_applied,
+        MAX_MND_ENRICH,
+    )
     reset_llm_metrics()
     logger.info("Enriching %s incidents via DeepSeek", len(mnd_df))
     enriched_mnd = enrich_incidents(mnd_df)
