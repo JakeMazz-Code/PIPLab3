@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -1352,7 +1353,8 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
         "validation_sparse_fallbacks={validation_sparse_fallbacks} "
         "os_anom_rows={os_anom_rows} wall_ms={wall_ms}"
     ).format(**metrics)
-    print(metrics_line)
+    print(metrics_line, flush=True)
+    sys.stdout.flush()
 
 
 

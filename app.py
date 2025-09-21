@@ -203,29 +203,45 @@ def _watch_cells(
     return filtered.reset_index()
 
 
-def _window_header(df: pd.DataFrame, hours: int) -> None:
+def _render_window_header(df: pd.DataFrame, hours: int) -> None:
+    """Render the UTC window bounds and counts for the current view."""
+
     total = len(df)
     if "source" in df.columns:
         mnd_count = int(df["source"].astype(str).eq("MND").sum())
     else:
         mnd_count = 0
 
-    range_text = None
-    if hours >= 24 and not df.empty and "dt" in df.columns:
+    start_dt: datetime | None = None
+    end_dt: datetime | None = None
+    if not df.empty and "dt" in df.columns:
         dt_series = pd.to_datetime(df["dt"], utc=True, errors="coerce")
         dt_series = dt_series.dropna()
         if not dt_series.empty:
-            start = dt_series.min()
-            end = dt_series.max()
-            range_text = (
-                f"Window: {start.strftime('%Y-%m-%d %H:%MZ')} -> "
-                f"{end.strftime('%Y-%m-%d %H:%MZ')} (~{hours}h)"
-            )
-
-    if range_text is None:
-        range_text = f"Window: last {hours}h"
-
-    st.caption(f"{range_text} | rows: {total} (MND: {mnd_count})")
+            start_dt = dt_series.min().to_pydatetime()
+            end_dt = dt_series.max().to_pydatetime()
+    if start_dt is None or end_dt is None:
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(hours=hours)
+    start_dt = start_dt.astimezone(timezone.utc)
+    end_dt = end_dt.astimezone(timezone.utc)
+    start_floor = start_dt.replace(minute=0, second=0, microsecond=0)
+    end_floor = end_dt.replace(minute=0, second=0, microsecond=0)
+    span_parts = [f"last {hours} h"]
+    if hours >= 24:
+        days_value = hours / 24
+        if hours % 24 == 0:
+            days_label = f"last {int(days_value)} d"
+        else:
+            days_label = f"last {days_value:.1f} d"
+        span_parts.append(days_label)
+    span_text = " / ".join(span_parts)
+    start_text = start_floor.strftime("%Y-%m-%d %H:%MZ")
+    end_text = end_floor.strftime("%Y-%m-%d %H:%MZ")
+    st.caption(
+        f"Window: {start_text} -> {end_text}  ({span_text}) | rows: {total} "
+        f"(MND: {mnd_count})"
+    )
 
 
 def _suggest_cutoff(df: pd.DataFrame) -> float | None:
@@ -451,6 +467,11 @@ def load_artifacts(
         risk_df = pd.DataFrame()
     else:
         st.error("daily_grid_risk.csv not found.")
+    if not risk_df.empty and "risk_score" in risk_df.columns:
+        risk_series = pd.to_numeric(risk_df["risk_score"], errors="coerce")
+        risk_series = risk_series.dropna()
+        if not risk_series.empty and risk_series.nunique() == 1:
+            st.info("daily_grid_risk.csv has a flat risk score.")
     brief_path = EXAMPLES_DIR / "airops_brief_24h.md"
     brief_text = None
     if brief_path.exists():
@@ -1255,7 +1276,7 @@ def _render_history_day_header(
     """Render window header and KPI cards for a history day."""
     hours = int(day_data.get("window_hours", 24))
     with placeholder.container():
-        _window_header(day_data["display_df"], hours)
+        _render_window_header(day_data["display_df"], hours)
         card_cols = st.columns(3)
         card_cols[0].metric(
             "Total points", f"{day_data['total_points']:,}"
@@ -1606,6 +1627,7 @@ def main() -> None:
         ["Analyst", "Arcade", "History"]
     )
     with analyst_tab:
+        _render_window_header(analyst_window_df, hours)
         kpi_prev_df: pd.DataFrame | None = None
         if not analyst_source_df.empty and "dt" in analyst_source_df.columns:
             dt_series = pd.to_datetime(
@@ -1666,7 +1688,6 @@ def main() -> None:
         kpi_cols[1].metric("Mean risk", risk_display, risk_delta)
         kpi_cols[2].metric("Mean OS_ANOM", os_display, os_delta)
         kpi_cols[3].metric("Top actor", top_actor, "--")
-        _window_header(analyst_window_df, hours)
         render_analyst_tab(
             analyst_source_df,
             analyst_window_df,
@@ -1677,11 +1698,12 @@ def main() -> None:
             brief_text
         )
     with arcade_tab:
-        _window_header(arcade_window_df, hours)
+        _render_window_header(arcade_window_df, hours)
         render_arcade_tab(
             arcade_window_df, cutoff, WATCHLIST_PATH, map_layer
         )
     with history_tab:
+        _render_window_header(window_df, hours)
         render_history_tab(manifest, hours, cutoff, only_mnd, map_layer)
     sidebar.markdown("---")
     dir_mtime = _path_mtime(ENRICHED_DIR)
