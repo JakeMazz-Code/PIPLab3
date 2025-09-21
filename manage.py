@@ -33,6 +33,7 @@ def _env_with_overrides(clear_key: bool = False,
 
 def _run_subprocess(label: str, args: List[str],
                     log_path: Optional[Path] = None,
+                    append: bool = False,
                     env: Optional[Dict[str, str]] = None) -> int:
     """Run a subprocess from repo root, optionally tee to a log file."""
     print(f"[{label}] exec:", " ".join(args))
@@ -40,7 +41,8 @@ def _run_subprocess(label: str, args: List[str],
     try:
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            out_handle = log_path.open("w", encoding="utf-8")
+            mode = "a" if append else "w"
+            out_handle = log_path.open(mode, encoding="utf-8")
             proc = subprocess.run(
                 args,
                 cwd=REPO_ROOT,
@@ -63,6 +65,8 @@ def _run_subprocess(label: str, args: List[str],
         if log_path is not None:
             msg += f" | log: {log_path}"
         print(msg)
+        if log_path is not None:
+            print(f"[{label}] wrote {log_path}")
         return code
     finally:
         if out_handle is not None:
@@ -97,7 +101,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
                               extra={"AUTO_RETRY_MAX": str(args.auto_retry).lower()
                                      if args.auto_retry is not None else
                                      os.environ.get("AUTO_RETRY_MAX", "false")})
-    return _run_subprocess("run", cmd, log_path=log_path, env=env)
+    return _run_subprocess(
+        "run",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+        env=env,
+    )
 
 
 def run_history(args: argparse.Namespace) -> int:
@@ -114,7 +124,13 @@ def run_history(args: argparse.Namespace) -> int:
         cmd.append("--resume")
     log_path = Path(args.log) if args.log else None
     env = _env_with_overrides(clear_key=args.no_key)
-    return _run_subprocess("history", cmd, log_path=log_path, env=env)
+    return _run_subprocess(
+        "history",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+        env=env,
+    )
 
 
 def run_ui(args: argparse.Namespace) -> int:
@@ -126,13 +142,25 @@ def run_ui(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     cmd = [sys.executable, "-m", "streamlit", "run", str(REPO_ROOT / "app.py")]
-    return _run_subprocess("ui", cmd)
+    log_path = Path(args.log) if args.log else None
+    return _run_subprocess(
+        "ui",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+    )
 
 
 def run_smoke(args: argparse.Namespace) -> int:
     """Execute the headless Streamlit smoke test."""
     cmd = [sys.executable, str(SCRIPTS_DIR / "ui_smoke.py")]
-    return _run_subprocess("smoke", cmd)
+    log_path = Path(args.log) if args.log else None
+    return _run_subprocess(
+        "smoke",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+    )
 
 
 def run_metrics(args: argparse.Namespace) -> int:
@@ -149,7 +177,12 @@ def run_simulation(args: argparse.Namespace) -> int:
     if args.seed is not None:
         cmd.extend(["--seed", str(args.seed)])
     log_path = Path(args.log) if args.log else None
-    return _run_subprocess("simulate", cmd, log_path=log_path)
+    return _run_subprocess(
+        "simulate",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+    )
 
 
 def run_backtest(args: argparse.Namespace) -> int:
@@ -157,7 +190,12 @@ def run_backtest(args: argparse.Namespace) -> int:
     cmd = [sys.executable, str(SCRIPTS_DIR / "backtest.py"),
            "--days", str(args.days)]
     log_path = Path(args.log) if args.log else None
-    return _run_subprocess("backtest", cmd, log_path=log_path)
+    return _run_subprocess(
+        "backtest",
+        cmd,
+        log_path=log_path,
+        append=args.append,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -181,6 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Filename prefix for artifacts/logs")
     run_parser.add_argument("--log", type=str, default=None,
                             help="Optional log path (default logs/<prefix>.log)")
+    run_parser.add_argument("--append", action="store_true",
+                            help="Append to the log path instead of clobbering")
     run_parser.add_argument("--no-key", action="store_true",
                             help="Run without DEEPSEEK_API_KEY (fallback)")
     run_parser.add_argument("--auto-retry", type=bool, default=None,
@@ -198,17 +238,27 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="Skip existing outputs")
     history_parser.add_argument("--log", type=str, default=None,
                                 help="Optional log path")
+    history_parser.add_argument("--append", action="store_true",
+                                help="Append to the log path instead of clobbering")
     history_parser.add_argument("--no-key", action="store_true",
                                  help="Run without DEEPSEEK_API_KEY")
     history_parser.set_defaults(func=run_history)
 
     # ui
     ui_parser = subparsers.add_parser("ui", help="Launch the Streamlit UI")
+    ui_parser.add_argument("--log", type=str, default=None,
+                           help="Optional log path")
+    ui_parser.add_argument("--append", action="store_true",
+                           help="Append to the log path instead of clobbering")
     ui_parser.set_defaults(func=run_ui)
 
     # smoke
     smoke_parser = subparsers.add_parser("smoke",
                                          help="Run the UI smoke test")
+    smoke_parser.add_argument("--log", type=str, default=None,
+                              help="Optional log path")
+    smoke_parser.add_argument("--append", action="store_true",
+                              help="Append to the log path instead of clobbering")
     smoke_parser.set_defaults(func=run_smoke)
 
     # metrics
@@ -227,6 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="Random seed")
     simulate_parser.add_argument("--log", type=str, default=None,
                                  help="Optional log path")
+    simulate_parser.add_argument("--append", action="store_true",
+                                 help="Append to the log path instead of clobbering")
     simulate_parser.set_defaults(func=run_simulation)
 
     # backtest
@@ -236,6 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="Number of days to score")
     backtest_parser.add_argument("--log", type=str, default=None,
                                  help="Optional log path")
+    backtest_parser.add_argument("--append", action="store_true",
+                                 help="Append to the log path instead of clobbering")
     backtest_parser.set_defaults(func=run_backtest)
 
     return parser
