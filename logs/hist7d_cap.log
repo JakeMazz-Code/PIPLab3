@@ -1,0 +1,109 @@
+2025-09-21 16:05:18,867 INFO main OpenSky (rest) states=53 for WIDE bbox
+2025-09-21 16:05:25,511 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:11:35,397 INFO main OpenSky (rest) states=52 for WIDE bbox
+2025-09-21 16:11:42,520 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:17:56,791 INFO main OpenSky (rest) states=54 for WIDE bbox
+2025-09-21 16:18:06,252 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:24:17,790 INFO main OpenSky (rest) states=57 for WIDE bbox
+2025-09-21 16:24:24,481 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:30:29,945 INFO main OpenSky (rest) states=56 for WIDE bbox
+2025-09-21 16:30:36,187 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:36:39,213 INFO main OpenSky (rest) states=50 for WIDE bbox
+2025-09-21 16:36:45,972 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+2025-09-21 16:42:47,312 INFO main OpenSky (rest) states=45 for WIDE bbox
+2025-09-21 16:42:47,312 INFO main OpenSky sparse (45); retrying once with MAX bbox.
+2025-09-21 16:42:48,017 INFO main OpenSky (rest) states=75 for MAX bbox
+2025-09-21 16:42:54,353 INFO main MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  combined = pd.concat(frames, ignore_index=True)
+[run] 20250914 backfill
+[run] 20250915 backfill
+[run] 20250916 backfill
+[run] 20250917 backfill
+[run] 20250918 backfill
+[run] 20250919 backfill
+[run] 20250920 backfill
+Traceback (most recent call last):
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\scripts\backfill.py", line 203, in <module>
+    sys.exit(main_cli())
+             ^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\scripts\backfill.py", line 192, in main_cli
+    processed = _process_day(day, args.resume)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\scripts\backfill.py", line 110, in _process_day
+    enriched_mnd = enrich_incidents(mnd_df)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\deepseek_enrichment.py", line 284, in enrich_incidents
+    responses = _call_deepseek_batch(prompts)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\deepseek_enrichment.py", line 237, in _call_deepseek_batch
+    parsed, raw = _call_deepseek_once(text)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\tenacity\__init__.py", line 338, in wrapped_f
+    return copy(f, *args, **kw)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\tenacity\__init__.py", line 477, in __call__
+    do = self.iter(retry_state=retry_state)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\tenacity\__init__.py", line 378, in iter
+    result = action(retry_state)
+             ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\tenacity\__init__.py", line 400, in <lambda>
+    self._add_action_func(lambda rs: rs.outcome.result())
+                                     ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\AppData\Local\Programs\Python\Python312\Lib\concurrent\futures\_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\AppData\Local\Programs\Python\Python312\Lib\concurrent\futures\_base.py", line 401, in __get_result
+    raise self._exception
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\tenacity\__init__.py", line 480, in __call__
+    result = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\deepseek_enrichment.py", line 141, in _call_deepseek_once
+    response = requests.post(
+               ^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\api.py", line 115, in post
+    return request("post", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\sessions.py", line 746, in send
+    r.content
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\models.py", line 902, in content
+    self._content = b"".join(self.iter_content(CONTENT_CHUNK_SIZE)) or b""
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\requests\models.py", line 820, in generate
+    yield from self.raw.stream(chunk_size, decode_content=True)
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\urllib3\response.py", line 1088, in stream
+    yield from self.read_chunked(amt, decode_content=decode_content)
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\urllib3\response.py", line 1248, in read_chunked
+    self._update_chunk_length()
+  File "C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\.venv\Lib\site-packages\urllib3\response.py", line 1167, in _update_chunk_length
+    line = self._fp.fp.readline()  # type: ignore[union-attr]
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\AppData\Local\Programs\Python\Python312\Lib\socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1252, in recv_into
+    return self.read(nbytes, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jakem\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1104, in read
+    return self._sslobj.read(len, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
