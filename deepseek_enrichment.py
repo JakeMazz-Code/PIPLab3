@@ -1,4 +1,10 @@
-"""DeepSeek enrichment utilities for gray-zone monitoring."""
+"""DeepSeek enrichment utilities for gray-zone monitoring.
+
+Manages DeepSeek batch calls, response hygiene, and briefing helpers.
+
+ENV knobs:
+- DEEPSEEK_API_KEY: auth token for outbound enrichment requests.
+"""
 
 from __future__ import annotations
 
@@ -228,7 +234,7 @@ def _ensure_types(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_deepseek_batch(texts: list[str]) -> list[dict[str, Any]]:
-    """Call DeepSeek for each text, handling retries and fallbacks."""
+    """Call DeepSeek for each text, handling retries and returning payloads."""
     results: list[dict[str, Any]] = []
     for chunk in _chunked(texts, MAX_BATCH_SIZE):
         for text in chunk:
@@ -316,7 +322,7 @@ def enrich_incidents(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_theater(df: pd.DataFrame, horizon: str = "24h") -> str:
-    """Create a concise plain-text summary for the given horizon."""
+    """Summarize incident risk for the requested horizon."""
     if df.empty:
         return (
             "No incidents available for the requested horizon; "

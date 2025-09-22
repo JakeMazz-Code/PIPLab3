@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Streamlit UI for the gray-zone monitor (read-only artifacts)."""
+"""Streamlit UI for the gray-zone monitor (read-only artifacts).
+
+Renders monitor/history views, charts, and download hooks for artifacts.
+
+ENV knobs:
+- None; UI only reads previously generated pipeline outputs.
+"""
 
 from __future__ import annotations
 
@@ -1903,6 +1909,8 @@ def _build_map_layers(
 
 
 
+# Map rendering ladder: sanitize layers -> pydeck deck -> _safe_pydeck_chart
+# Fallback to st.map if pydeck missing/invalid; view fixed via MAP_* + MAP_HEIGHT
 def _render_incident_map(
     df_os: pd.DataFrame,
     df_mnd: pd.DataFrame,
@@ -2298,6 +2306,8 @@ def render_history_tab(
     if not history_days:
         st.info("No history available. Run backfill.")
         return
+    # History tab works entirely from cached artifacts; the day slider just
+    # bounds how many local snapshots we load (no Analyst dependency).
     history_max = min(14, len(history_days))
     default_days = min(7, history_max)
     if hours is not None:

@@ -1,4 +1,13 @@
-"""Main ETL pipeline for Taiwan gray-zone monitoring."""
+"""Main ETL pipeline for Taiwan gray-zone monitoring.
+
+Handles extraction, enrichment, artifact generation, and CLI orchestration.
+
+ENV knobs:
+- GRAYZONE_LOG_LEVEL: overrides logging verbosity.
+- AUTO_RETRY_MAX: enable MAX bbox retry when OpenSky sparse.
+- MAX_MND_ENRICH: cap MND rows sent to DeepSeek.
+- MND_MAX_PAGES: limit bulletin pagination during scrape.
+"""
 
 from __future__ import annotations
 
@@ -914,6 +923,8 @@ def scrape_mnd() -> list[dict]:
     }
     timestamp = _timestamp()
     results: list[dict[str, Any]] = []
+    # Dedupe uses (dt iso, title); adjust MND_MAX_PAGES or key mix here
+    # if bulletin pagination rules change upstream.
     seen_keys: set[tuple[str, str]] = set()
     raw_cards = 0
     parsed_rows = 0
@@ -1422,6 +1433,11 @@ def _run_pipeline(hours: int, bbox: list | None, prefix: str | None) -> None:
             os_anom_rows = int(corrs.apply(_contains_os_anom).sum())
     metrics["os_anom_rows"] = os_anom_rows
     metrics["wall_ms"] = int((time.perf_counter() - start_time) * 1000)
+    # METRICS legend: opensky_points=len(os_df); mnd_rows=len(mnd_rows);
+    # merged_rows=len(merged); enriched_rows=len(enriched_mnd);
+    # llm_* counters come from get_llm_metrics(); needs_review_count sums the
+    # review flag; validation_sparse_fallbacks tallies z-score fallbacks;
+    # os_anom_rows counts OS corroborations; wall_ms is total runtime.
     metrics_line = (
         "METRICS | opensky_points={opensky_points} "
         "mnd_rows={mnd_rows} merged_rows={merged_rows} "

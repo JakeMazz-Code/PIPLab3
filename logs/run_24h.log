@@ -1,12 +1,10 @@
-2025-09-21 18:12:04,597 INFO __main__ Starting extraction phase
-2025-09-21 18:12:05,321 INFO __main__ OpenSky (rest) states=25 for WIDE bbox
-2025-09-21 18:12:05,321 INFO __main__ OpenSky sparse (25); retrying once with MAX bbox.
-2025-09-21 18:12:06,007 INFO __main__ OpenSky (rest) states=53 for MAX bbox
-2025-09-21 18:12:12,252 INFO __main__ MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
-C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1036: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+2025-09-21 21:12:30,751 INFO __main__ Starting extraction phase
+2025-09-21 21:12:31,685 INFO __main__ OpenSky (rest) states=68 for WIDE bbox
+2025-09-21 21:12:39,052 INFO __main__ MND scrape: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50
+C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\main.py:1047: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
   combined = pd.concat(frames, ignore_index=True)
-2025-09-21 18:12:12,265 INFO __main__ MND: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50 pre_limit=50 for_llm=50 limit_applied=False max_mnd_enrich=0
-2025-09-21 18:12:12,265 INFO __main__ Enriching 50 incidents via DeepSeek
-2025-09-21 18:18:23,986 INFO __main__ Enriched dataset written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\incidents_enriched_2025092122.parquet
-2025-09-21 18:18:23,998 INFO __main__ Daily grid risk written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\daily_grid_risk.csv
-METRICS | opensky_points=53 mnd_rows=50 merged_rows=103 enriched_rows=50 llm_success=50 llm_invalid_json=0 llm_retries=0 needs_review_count=0 validation_sparse_fallbacks=50 os_anom_rows=50 wall_ms=379409
+2025-09-21 21:12:39,066 INFO __main__ MND: pages=5 raw_cards=50 parsed_rows=50 after_dedupe=50 pre_limit=50 for_llm=50 limit_applied=False max_mnd_enrich=0
+2025-09-21 21:12:39,066 INFO __main__ Enriching 50 incidents via DeepSeek
+2025-09-21 21:18:25,655 INFO __main__ Enriched dataset written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\incidents_enriched_2025092201.parquet
+2025-09-21 21:18:25,667 INFO __main__ Daily grid risk written to C:\Users\jakem\Projects In Programming\PIPLab3_newIdea\grayzone-tw\data\enriched\daily_grid_risk.csv
+METRICS | opensky_points=68 mnd_rows=50 merged_rows=118 enriched_rows=50 llm_success=50 llm_invalid_json=0 llm_retries=0 needs_review_count=0 validation_sparse_fallbacks=50 os_anom_rows=50 wall_ms=354922
