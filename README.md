@@ -283,6 +283,21 @@ python ./scripts/print_metrics.py --log ./logs/mon24.log
 streamlit run app.py
 ```
 
+## Logs: app logger vs shell redirection
+
+The pipeline writes **structured logs** via Python’s `logging` module to fixed
+files. For a 24‑hour run, the logger writes to:
+
+- `logs/run_24h.log`
+
+If you run:
+
+```powershell
+python .\manage.py run --hours 24 > .\logs\mon24.log
+the > only captures stdout/stderr, not the logger’s output. The METRICS
+line and INFO/WARNING records you care about will be in
+logs/run_24h.log, not in mon24.log.
+
 ### Build N‑day history
 
 ```powershell
